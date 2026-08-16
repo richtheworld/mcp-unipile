@@ -51,11 +51,12 @@ The server offers several tools for accessing Unipile data:
 
 ## Setup
 
-You'll need a Unipile DSN and API key. You can obtain these from your Unipile dashboard.
+You'll need an Unipile v2 API key. You can obtain it from the v2 dashboard.
 
 ### Environment Variables
-- `UNIPILE_DSN`: Your Unipile DSN (e.g. api8.unipile.com:13851)
-- `UNIPILE_API_KEY`: Your Unipile API key
+- `UNIPILE_V2_API_KEY`: Your Unipile v2 application key
+- `UNIPILE_V2_BASE_URL`: Optional; defaults to `https://api.unipile.com`
+- `UNIPILE_V2_LINKEDIN_ACCOUNT_ID`: Optional Recruiter account pin (`acc_...`)
 
 Note: Keep your API key secure and never commit it to version control.
 
@@ -81,8 +82,7 @@ docker build -t mcp-unipile .
 Run the container:
 ```bash
 docker run \
-  -e UNIPILE_DSN=your_dsn_here \
-  -e UNIPILE_API_KEY=your_api_key_here \
+  -e UNIPILE_V2_API_KEY=your_api_key_here \
   buryhuang/mcp-unipile:latest
 ```
 
@@ -118,9 +118,7 @@ To publish the Docker image for multiple platforms, you can use the `docker buil
         "-i",
         "--rm",
         "-e",
-        "UNIPILE_DSN=your_dsn_here",
-        "-e",
-        "UNIPILE_API_KEY=your_api_key_here",
+        "UNIPILE_V2_API_KEY=your_api_key_here",
         "buryhuang/mcp-unipile:latest"
       ]
     }
@@ -135,6 +133,62 @@ To set up the development environment:
 ```bash
 pip install -e .
 ```
+
+## LinkedIn Recruiter CLI
+
+The package also installs `unipile-recruiter`, a JSON-first CLI for guarded
+LinkedIn Recruiter sourcing workflows using only Unipile v2.
+
+Set credentials in environment variables; the API key is intentionally not
+accepted as a command-line argument:
+
+```sh
+export UNIPILE_V2_API_KEY="..."
+export UNIPILE_V2_LINKEDIN_ACCOUNT_ID="acc_..."  # optional when one account is running
+```
+
+Read-only examples:
+
+```sh
+unipile-recruiter doctor
+unipile-recruiter projects --keywords Strala
+unipile-recruiter project 2107551666
+unipile-recruiter open-to-work linkedin-public-slug
+unipile-recruiter search --body search.json --limit 25
+unipile-recruiter search-parameters LOCATION --keywords London
+unipile-recruiter pipeline PROJECT_ID --body '{"spotlights":["OPEN_TO_WORK"]}'
+```
+
+Mutation commands are dry-runs by default. A candidate save first validates the
+project and prints the exact confirmation token:
+
+```sh
+unipile-recruiter save CANDIDATE_ID \
+  --project PROJECT_ID --stage PIPELINE_STAGE_ID
+```
+
+Only the explicit second invocation mutates Recruiter:
+
+```sh
+unipile-recruiter save CANDIDATE_ID \
+  --project PROJECT_ID --stage PIPELINE_STAGE_ID \
+  --execute --confirm 'SAVE:PROJECT_ID:CANDIDATE_ID'
+```
+
+`--stage` is the exact pipeline stage ID. Project creation and editing are
+guarded convenience commands. `proxy` exposes
+Unipile's raw LinkedIn gateway; embedded `POST`, `PUT`, `PATCH`, and `DELETE`
+requests also require an execution flag and exact confirmation token.
+
+Run `unipile-recruiter capabilities` for the supported surface and
+`python -m unittest discover -s tests` for the safety/unit tests.
+
+### v1 deprecation
+
+The supported server and CLI no longer read `UNIPILE_DSN`,
+`UNIPILE_API_KEY`, `UNIPILE_V1_*`, or any dual-routing configuration. There is
+no automatic fallback to v1. The historical dual bridge remains only as
+unreferenced migration evidence; its gateway constructors fail closed.
 
 ## License
 

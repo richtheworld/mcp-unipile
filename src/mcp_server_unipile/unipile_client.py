@@ -1,23 +1,34 @@
 import requests
 import logging
-from typing import List, Dict, Optional, Generator
+from typing import Any, List, Dict, Optional, Generator
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_BASE_URL = "https://api.unipile.com"
+
+
 class UnipileClient:
-    def __init__(self, dsn: str, api_key: str):
+    def __init__(self, api_key: str, base_url: str = DEFAULT_BASE_URL):
         """
         Initialize the Unipile client
-        
+
         Args:
-            dsn: Your Unipile DSN (e.g. 'api8.unipile.com:13851')
+            base_url: Unipile v2 base URL
             api_key: Your Unipile API key
         """
-        self.base_url = f"https://{dsn}"
+        self.base_url = base_url.rstrip("/")
+        if self.base_url != DEFAULT_BASE_URL:
+            raise ValueError("Unipile v2 requires base URL https://api.unipile.com")
         self.headers = {
             'X-API-KEY': api_key,
             'accept': 'application/json'
         }
+
+    @staticmethod
+    def _account(account_id: str) -> str:
+        if not account_id.startswith("acc_"):
+            raise ValueError("Unipile v2 account IDs must start with acc_")
+        return account_id
 
     def get_accounts(self) -> List[Dict]:
         """
@@ -29,15 +40,32 @@ class UnipileClient:
         Raises:
             requests.exceptions.RequestException: If the API request fails
         """
-        url = f"{self.base_url}/api/v1/accounts"
-        response = requests.get(url, headers=self.headers)
+        url = f"{self.base_url}/v2/accounts/"
+        response = requests.get(
+            url, headers=self.headers, params={"limit": 100}, timeout=60
+        )
         response.raise_for_status()
         data = response.json()
         
-        # The accounts are in the items array
-        if data.get("object") == "AccountList":
-            return data.get("items", [])
-        return []
+        return data.get("data") or data.get("items") or []
+
+    def get_linkedin_profile(
+        self,
+        account_id: str,
+        identifier: str,
+        linkedin_api: Optional[str] = "recruiter",
+    ) -> Dict:
+        """Retrieve a LinkedIn profile through Classic, Recruiter, or Sales Navigator."""
+        account_id = self._account(account_id)
+        url = f"{self.base_url}/v2/{account_id}/users/{identifier}"
+        params = {
+            "variant": f"linkedin_{linkedin_api}" if linkedin_api else "linkedin_classic"
+        }
+        response = requests.get(
+            url, headers=self.headers, params=params, timeout=60
+        )
+        response.raise_for_status()
+        return response.json()
 
     def get_chats(self, account_id: str, limit: int = 10) -> List[Dict]:
         """
@@ -64,17 +92,22 @@ class UnipileClient:
         Raises:
             requests.exceptions.RequestException: If the API request fails
         """
-        url = f"{self.base_url}/api/v1/chats?account_id={account_id}&limit={limit}"
-        response = requests.get(url, headers=self.headers)
+        account_id = self._account(account_id)
+        url = f"{self.base_url}/v2/{account_id}/chats"
+        response = requests.get(
+            url, headers=self.headers, params={"limit": limit}, timeout=60
+        )
         response.raise_for_status()
         data = response.json()
         
-        # The chats are in the items array
-        if data.get("object") == "ChatList":
-            return data.get("items", [])
-        return []
+        return data.get("data") or data.get("items") or []
 
-    def get_all_messages(self, chat_id: str, batch_size: int = 100) -> Generator[Dict, None, None]:
+    def get_all_messages(
+        self,
+        account_id: str,
+        chat_id: str,
+        batch_size: int = 100,
+    ) -> Generator[Dict, None, None]:
         """
         Get all messages from a chat using pagination
         
@@ -100,37 +133,42 @@ class UnipileClient:
             requests.exceptions.RequestException: If the API request fails
         """
         cursor = None
+        offset = 0
+        account_id = self._account(account_id)
         
         while True:
             # Prepare URL and parameters
-            url = f"{self.base_url}/api/v1/chats/{chat_id}/messages"
-            params = {'limit': batch_size}
+            url = f"{self.base_url}/v2/{account_id}/chats/{chat_id}/messages"
+            params: Dict[str, Any] = {'limit': batch_size, 'offset': offset}
             if cursor:
                 params['cursor'] = cursor
+                params.pop('offset', None)
                 
             # Make API request
-            response = requests.get(url, headers=self.headers, params=params)
+            response = requests.get(
+                url, headers=self.headers, params=params, timeout=60
+            )
             response.raise_for_status()
             
             data = response.json()
             
-            # The messages are in the items array
-            if data.get("object") == "MessageList":
-                messages = data.get("items", [])
-                # Yield each message
-                for message in messages:
-                    yield message
-                
-                # Get cursor for next page
-                cursor = data.get('cursor')
-                
-                # If no cursor or cursor is null, we've reached the end
-                if not cursor:
-                    break
-            else:
-                break
+            messages = data.get("data") or data.get("items") or []
+            for message in messages:
+                yield message
 
-    def get_messages_as_list(self, chat_id: str, batch_size: int = 100) -> List[Dict]:
+            cursor = data.get('next_cursor')
+            if cursor:
+                continue
+            if not messages or len(messages) < batch_size:
+                break
+            offset += batch_size
+
+    def get_messages_as_list(
+        self,
+        account_id: str,
+        chat_id: str,
+        batch_size: int = 100,
+    ) -> List[Dict]:
         """
         Get all messages from a chat as a list
         
@@ -144,7 +182,7 @@ class UnipileClient:
         Raises:
             requests.exceptions.RequestException: If the API request fails
         """
-        return list(self.get_all_messages(chat_id, batch_size))
+        return list(self.get_all_messages(account_id, chat_id, batch_size))
 
     def get_emails(self, account_id: str, limit: int = 10) -> List[Dict]:
         """
@@ -173,30 +211,15 @@ class UnipileClient:
         Raises:
             requests.exceptions.RequestException: If the API request fails
         """
-        url = f"{self.base_url}/api/v1/emails"
-        params = {
-            'account_id': account_id,
-            'limit': limit
-        }
-        response = requests.get(url, headers=self.headers, params=params)
+        account_id = self._account(account_id)
+        url = f"{self.base_url}/v2/{account_id}/emails"
+        params = {'limit': limit}
+        response = requests.get(
+            url, headers=self.headers, params=params, timeout=60
+        )
         response.raise_for_status()
         data = response.json()
         
-        # The emails are in the items array
-        if data.get("object") == "EmailList":
-            return data.get("items", [])
-        return []
+        return data.get("data") or data.get("items") or []
 
 # Example usage:
-if __name__ == "__main__":
-    # Initialize client
-    client = UnipileClient(
-        dsn="api8.unipile.com:13851",  # Replace with your DSN
-        api_key="your_access_token_here"     # Replace with your access token
-    )
-    
-    # Get messages using generator (memory efficient for large chats)
-    chat_id = "your_chat_id"
-    for message in client.get_all_messages(chat_id):
-        print(f"Message: {message}")
-        
