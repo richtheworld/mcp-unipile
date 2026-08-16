@@ -171,15 +171,15 @@ class RecruiterClient:
             if error.status_code not in {404, 422}:
                 raise
         classic = self.get_profile(account_id, identifier, "classic")
-        provider_id = classic.get("provider_id")
+        provider_id = classic.get("provider_id") or classic.get("id")
         if not provider_id:
-            raise ValueError("Classic profile did not return provider_id")
+            raise ValueError("Classic profile did not return a provider identifier")
         return self.get_profile(account_id, str(provider_id), "recruiter"), 2
 
     def open_to_work(self, account_id: str, identifier: str) -> dict[str, Any]:
         profile, calls = self.resolve_recruiter_profile(account_id, identifier)
         return {
-            "provider_id": profile.get("provider_id"),
+            "provider_id": profile.get("provider_id") or profile.get("id"),
             "public_identifier": profile.get("public_identifier"),
             "first_name": profile.get("first_name"),
             "last_name": profile.get("last_name"),

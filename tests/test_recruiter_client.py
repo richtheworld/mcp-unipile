@@ -89,6 +89,25 @@ class RecruiterClientTests(unittest.TestCase):
         self.assertIn("/v2/acc_123/linkedin/recruiter/search/people", call.args[1])
         self.assertEqual(call.kwargs["json"], {"keywords": "FDE"})
 
+    def test_recruiter_resolution_uses_v2_classic_id(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(
+            side_effect=[
+                UnipileAPIError(404, "api/resource_not_found", "not found"),
+                {"id": "ACoA-classic-id", "public_identifier": "ada"},
+                {"id": "AE-recruiter-id", "is_open_to_work": True},
+            ]
+        )
+
+        profile, calls = client.resolve_recruiter_profile("acc_123", "ada")
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(profile["id"], "AE-recruiter-id")
+        self.assertEqual(
+            client.get_profile.call_args_list[2].args,
+            ("acc_123", "ACoA-classic-id", "recruiter"),
+        )
+
     def test_recruiter_search_parameters_use_post_body_contract(self):
         session = Mock()
         session.request.return_value = FakeResponse(payload={"data": []})

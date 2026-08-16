@@ -168,7 +168,7 @@ class UnipileWrapper:
                     identifier=identifier,
                     linkedin_api=None,
                 )
-                provider_id = classic_profile.get("provider_id")
+                provider_id = classic_profile.get("provider_id") or classic_profile.get("id")
                 if not provider_id:
                     raise ValueError("LinkedIn profile did not provide an internal member ID")
                 identifier = str(provider_id)
@@ -186,7 +186,7 @@ class UnipileWrapper:
             recruiter_signal = profile.get("is_open_to_work")
             result = {
                 "provider": profile.get("provider"),
-                "provider_id": profile.get("provider_id"),
+                "provider_id": profile.get("provider_id") or profile.get("id"),
                 "public_identifier": profile.get("public_identifier"),
                 "first_name": profile.get("first_name"),
                 "last_name": profile.get("last_name"),
