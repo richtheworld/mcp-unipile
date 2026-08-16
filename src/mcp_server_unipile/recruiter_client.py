@@ -310,27 +310,45 @@ class RecruiterClient:
     def find_candidate_in_pipeline(
         self, account_id: str, project_id: str, candidate_id: str
     ) -> Optional[dict[str, Any]]:
-        """Find an exact candidate ID in a v2 project pipeline using a narrow search."""
+        """Find an exact candidate ID across every page of a v2 project pipeline."""
         profile = self.get_profile(account_id, candidate_id, "recruiter")
         full_name = " ".join(
             part for part in (profile.get("first_name"), profile.get("last_name")) if part
         )
         body = {"keywords": full_name} if full_name else {}
-        data = self.list_pipeline(account_id, project_id, body, limit=100)
-        items = data.get("data") or data.get("items") or []
-        for item in items:
-            candidate = item.get("profile") or item.get("candidate") or item
-            known_ids = {
-                str(value)
-                for value in (
-                    candidate.get("id"),
-                    candidate.get("candidate_id"),
-                    candidate.get("provider_id"),
-                )
-                if value
-            }
-            if candidate_id in known_ids:
-                return item
+        cursor: Optional[str] = None
+        seen_cursors: set[str] = set()
+        while True:
+            data = self.list_pipeline(
+                account_id, project_id, body, cursor=cursor, limit=100
+            )
+            items = data.get("data") or data.get("items") or []
+            for item in items:
+                candidate = item.get("profile") or item.get("candidate") or item
+                known_ids = {
+                    str(value)
+                    for value in (
+                        candidate.get("id"),
+                        candidate.get("candidate_id"),
+                        candidate.get("provider_id"),
+                    )
+                    if value
+                }
+                if candidate_id in known_ids:
+                    return item
+
+            raw_paging = data.get("paging")
+            paging: dict[str, Any] = raw_paging if isinstance(raw_paging, dict) else {}
+            next_cursor = (
+                data.get("cursor")
+                or data.get("next_cursor")
+                or paging.get("cursor")
+                or paging.get("next_cursor")
+            )
+            if not next_cursor or str(next_cursor) in seen_cursors:
+                break
+            cursor = str(next_cursor)
+            seen_cursors.add(cursor)
         return None
 
     def list_search_parameters(

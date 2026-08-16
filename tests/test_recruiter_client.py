@@ -107,6 +107,29 @@ class RecruiterClientTests(unittest.TestCase):
         )
         self.assertEqual(call.kwargs["params"], {"limit": 25})
 
+    def test_pipeline_candidate_lookup_follows_cursor_pages(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(
+            return_value={"first_name": "Ada", "last_name": "Lovelace"}
+        )
+        client.list_pipeline = Mock(
+            side_effect=[
+                {"items": [{"candidate_id": "someone-else"}], "cursor": "page-2"},
+                {"items": [{"candidate_id": "candidate-123"}]},
+            ]
+        )
+
+        result = client.find_candidate_in_pipeline(
+            "acc_123", "project-1", "candidate-123"
+        )
+
+        self.assertEqual(result, {"candidate_id": "candidate-123"})
+        self.assertEqual(client.list_pipeline.call_count, 2)
+        self.assertIsNone(client.list_pipeline.call_args_list[0].kwargs["cursor"])
+        self.assertEqual(
+            client.list_pipeline.call_args_list[1].kwargs["cursor"], "page-2"
+        )
+
     def test_save_is_dry_run_by_default(self):
         parser = build_parser()
         args = parser.parse_args([

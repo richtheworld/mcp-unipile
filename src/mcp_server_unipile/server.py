@@ -159,7 +159,10 @@ class UnipileWrapper:
 
             # Recruiter profile requests require LinkedIn's internal member ID.
             # Resolve normal public slugs first so callers can pass sheet URLs/slugs.
-            if linkedin_api == "recruiter" and not identifier.startswith(("ACoA", "AEMA")):
+            recruiter_id_prefixes = ("ACoA", "AEMA", "AEM", "AE")
+            if linkedin_api == "recruiter" and not identifier.startswith(
+                recruiter_id_prefixes
+            ):
                 classic_profile = self.client.get_linkedin_profile(
                     account_id=account_id,
                     identifier=identifier,
