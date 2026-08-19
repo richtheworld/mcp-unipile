@@ -10,8 +10,18 @@ dependencies = ["mcp>=1.0.0", "python-dotenv>=1.0.0", "requests>=2.31.0", "markd
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = ["pyright>=1.1.389"]
-
 [project.scripts]
-mcp-server-unipile = "mcp_server_unipile:main" 
+mcp-server-unipile = "mcp_server_unipile:main"
+unipile-recruiter = "mcp_server_unipile.recruiter_cli:main"
+
+[dependency-groups]
+dev = ["pyright>=1.1.389"]
+
+[tool.pyright]
+include = [
+  "src/mcp_server_unipile/recruiter_client.py",
+  "src/mcp_server_unipile/recruiter_cli.py",
+  "src/mcp_server_unipile/dual_recruiter.py",
+  "src/mcp_server_unipile/unipile_client.py",
+]
+pythonVersion = "3.11"

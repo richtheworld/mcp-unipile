@@ -17,19 +17,17 @@ logger = logging.getLogger(__name__)
 from .unipile_client import UnipileClient
 
 class UnipileWrapper:
-    def __init__(self, dsn: Optional[str] = None, api_key: Optional[str] = None):
-        dsn = dsn or os.getenv("UNIPILE_DSN")
-        api_key = api_key or os.getenv("UNIPILE_API_KEY")
-        
-        logger.debug(f"Using DSN: {'[MASKED]' if dsn else 'None'}")
-        if not dsn:
-            raise ValueError("UNIPILE_DSN environment variable is required")
-            
+    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None):
+        base_url = base_url or os.getenv(
+            "UNIPILE_V2_BASE_URL", "https://api.unipile.com"
+        )
+        api_key = api_key or os.getenv("UNIPILE_V2_API_KEY")
+
         logger.debug(f"Using API key: {'[MASKED]' if api_key else 'None'}")
         if not api_key:
-            raise ValueError("UNIPILE_API_KEY environment variable is required")
-        
-        self.client = UnipileClient(dsn=dsn, api_key=api_key)
+            raise ValueError("UNIPILE_V2_API_KEY environment variable is required")
+
+        self.client = UnipileClient(api_key=api_key, base_url=base_url)
 
     def _extract_person_info(self, original_data: dict) -> dict:
         """Extract core person information from message data"""
@@ -131,9 +129,6 @@ class UnipileWrapper:
     def get_emails(self, account_id: str, limit: int = 10) -> str:
         """Get emails for a specific account"""
         try:
-            # The account_id may be looks like this: abcdefg_MAILS
-            # remove the _MAILS part from right side
-            account_id = re.sub(r"_[A-Z]+$", "", account_id)
             emails = self.client.get_emails(account_id=account_id, limit=limit)
             # Transform each email to extract core content
             core_emails = [self._extract_core_email(email) for email in emails]
@@ -151,22 +146,83 @@ class UnipileWrapper:
             logger.error(f"Error getting accounts: {str(e)}")
             return json.dumps({"error": str(e)})
 
+    def get_linkedin_open_to_work(
+        self,
+        account_id: str,
+        identifier: str,
+        linkedin_api: str = "recruiter",
+    ) -> str:
+        """Return the documented LinkedIn Open to Work signal without contact data."""
+        try:
+            requested_identifier = identifier
+            classic_profile = None
+
+            # Recruiter profile requests require LinkedIn's internal member ID.
+            # Resolve normal public slugs first so callers can pass sheet URLs/slugs.
+            recruiter_id_prefixes = ("ACoA", "AEMA", "AEM", "AE")
+            if linkedin_api == "recruiter" and not identifier.startswith(
+                recruiter_id_prefixes
+            ):
+                classic_profile = self.client.get_linkedin_profile(
+                    account_id=account_id,
+                    identifier=identifier,
+                    linkedin_api=None,
+                )
+                provider_id = classic_profile.get("provider_id") or classic_profile.get("id")
+                if not provider_id:
+                    raise ValueError("LinkedIn profile did not provide an internal member ID")
+                identifier = str(provider_id)
+
+            profile = self.client.get_linkedin_profile(
+                account_id=account_id,
+                identifier=identifier,
+                linkedin_api=linkedin_api,
+            )
+            classic_signal = (
+                classic_profile.get("is_open_to_work")
+                if classic_profile is not None
+                else None
+            )
+            recruiter_signal = profile.get("is_open_to_work")
+            result = {
+                "provider": profile.get("provider"),
+                "provider_id": profile.get("provider_id") or profile.get("id"),
+                "public_identifier": profile.get("public_identifier"),
+                "first_name": profile.get("first_name"),
+                "last_name": profile.get("last_name"),
+                "requested_identifier": requested_identifier,
+                "linkedin_api": linkedin_api,
+                "is_open_to_work": recruiter_signal,
+                "classic_is_open_to_work": classic_signal,
+                "is_recruiter_only_open_to_work": (
+                    recruiter_signal is True and classic_signal is not True
+                    if classic_profile is not None
+                    else None
+                ),
+                "is_open_profile": profile.get("is_open_profile"),
+            }
+            return json.dumps(result, default=str)
+        except Exception as e:
+            logger.error(f"Error getting LinkedIn Open to Work status: {str(e)}")
+            return json.dumps({"error": str(e)})
+
     def get_chats(self, account_id: str, limit: int = 10) -> str:
         """Get all available chats for a specific account"""
         try:
-            # The account_id may be looks like this: abcdefg_MESSAGING, abcdefg_MAILS, abcdefg_WHATSAPP
-            # remove the _MESSAGING part from right side
-            account_id = re.sub(r"_[A-Z]+$", "", account_id)
             chats = self.client.get_chats(account_id=account_id, limit=limit)
             return json.dumps(chats)
         except Exception as e:
             logger.error(f"Error getting chats: {str(e)}")
             return json.dumps({"error": str(e)})
 
-    def get_chat_messages(self, chat_id: str, batch_size: int = 100) -> str:
+    def get_chat_messages(
+        self, account_id: str, chat_id: str, batch_size: int = 100
+    ) -> str:
         """Get all messages from a chat"""
         try:
-            messages = self.client.get_messages_as_list(chat_id, batch_size)
+            messages = self.client.get_messages_as_list(
+                account_id, chat_id, batch_size
+            )
             # Transform each message to extract core content
             core_messages = [self._extract_core_message(msg) for msg in messages]
             return json.dumps(core_messages)
@@ -188,7 +244,7 @@ class UnipileWrapper:
             for chat in chats:
                 chat_id = chat.get('id')
                 if chat_id:
-                    messages = self.client.get_messages_as_list(chat_id)
+                    messages = self.client.get_messages_as_list(account_id, chat_id)
                     # Transform each message to extract core content
                     core_messages = [self._extract_core_message(msg) for msg in messages]
                     all_messages.extend(core_messages)
@@ -198,10 +254,10 @@ class UnipileWrapper:
             logger.error(f"Error getting all messages: {str(e)}")
             return json.dumps({"error": str(e)})
 
-async def main(dsn: Optional[str] = None, api_key: Optional[str] = None):
+async def main(base_url: Optional[str] = None, api_key: Optional[str] = None):
     """Run the Unipile MCP server."""
     logger.info("Server starting")
-    unipile = UnipileWrapper(dsn, api_key)
+    unipile = UnipileWrapper(base_url, api_key)
     server = Server("unipile")
 
     @server.list_resources()
@@ -253,10 +309,28 @@ async def main(dsn: Optional[str] = None, api_key: Optional[str] = None):
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "account_id": {"type": "string", "description": "The one source ID of of the account to get messages from. It is the id of the source objects in the account's sources array."},
+                        "account_id": {"type": "string", "description": "Connected Unipile v2 account ID (acc_...)."},
                         "batch_size": {"type": "integer", "description": "Number of messages to fetch per chat (default: 20)"}
                     },
                     "required": ["account_id"]
+                },
+            ),
+            types.Tool(
+                name="unipile_get_linkedin_open_to_work",
+                description="Retrieve a LinkedIn profile through a connected Recruiter contract and return the documented is_open_to_work signal. The response is deliberately limited to identity and availability fields and excludes contact details.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "string", "description": "Connected Unipile LinkedIn account ID"},
+                        "identifier": {"type": "string", "description": "LinkedIn public identifier or provider-internal profile ID"},
+                        "linkedin_api": {
+                            "type": "string",
+                            "enum": ["recruiter", "sales_navigator"],
+                            "default": "recruiter",
+                            "description": "LinkedIn paid product used to retrieve the profile"
+                        }
+                    },
+                    "required": ["account_id", "identifier"]
                 },
             ),
             types.Tool(
@@ -309,7 +383,11 @@ async def main(dsn: Optional[str] = None, api_key: Optional[str] = None):
                 for chat in chats:
                     chat_id = chat.get('id')
                     if chat_id:
-                        messages = json.loads(unipile.get_chat_messages(chat_id, batch_size))
+                        messages = json.loads(
+                            unipile.get_chat_messages(
+                                account_id, chat_id, batch_size
+                            )
+                        )
                         if isinstance(messages, list):
                             for message in messages:
                                 message['chat_info'] = {
@@ -325,6 +403,24 @@ async def main(dsn: Optional[str] = None, api_key: Optional[str] = None):
                     text=json.dumps(all_messages, default=str),
                     mimeType="application/json",
                     uri=AnyUrl(f"unipile://messages/{account_id}")
+                )]
+            elif name == "unipile_get_linkedin_open_to_work":
+                if not arguments:
+                    raise ValueError("Missing arguments for unipile_get_linkedin_open_to_work")
+
+                account_id = arguments["account_id"]
+                identifier = arguments["identifier"]
+                linkedin_api = arguments.get("linkedin_api", "recruiter")
+                results = unipile.get_linkedin_open_to_work(
+                    account_id=account_id,
+                    identifier=identifier,
+                    linkedin_api=linkedin_api,
+                )
+                return [types.TextContent(
+                    type="text",
+                    text=results,
+                    mimeType="application/json",
+                    uri=AnyUrl(f"unipile://linkedin/open-to-work/{identifier}")
                 )]
             elif name == "unipile_get_emails":
                 if not arguments:
@@ -369,4 +465,4 @@ async def main(dsn: Optional[str] = None, api_key: Optional[str] = None):
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(main()) 
+    asyncio.run(main())
