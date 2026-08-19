@@ -21,6 +21,7 @@ dev = ["pyright>=1.1.389"]
 include = [
   "src/mcp_server_unipile/recruiter_client.py",
   "src/mcp_server_unipile/recruiter_cli.py",
+  "src/mcp_server_unipile/dual_recruiter.py",
   "src/mcp_server_unipile/unipile_client.py",
 ]
 pythonVersion = "3.11"

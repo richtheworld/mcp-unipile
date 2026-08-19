@@ -51,12 +51,17 @@ The server offers several tools for accessing Unipile data:
 
 ## Setup
 
-You'll need an Unipile v2 API key. You can obtain it from the v2 dashboard.
+You'll need an Unipile v2 API key for production use. An explicitly selected
+legacy v1 connection can also be configured for read-only migration audits.
 
 ### Environment Variables
 - `UNIPILE_V2_API_KEY`: Your Unipile v2 application key
 - `UNIPILE_V2_BASE_URL`: Optional; defaults to `https://api.unipile.com`
 - `UNIPILE_V2_LINKEDIN_ACCOUNT_ID`: Optional Recruiter account pin (`acc_...`)
+- `UNIPILE_V1_API_KEY`: Legacy audit key (v1 reads only)
+- `UNIPILE_V1_BASE_URL`: Legacy v1 DSN/base URL
+- `UNIPILE_V1_LINKEDIN_ACCOUNT_ID`: Optional legacy account pin
+- `UNIPILE_RECRUITER_BACKEND`: Optional CLI default; `v2` unless explicitly set
 
 Note: Keep your API key secure and never commit it to version control.
 
@@ -137,7 +142,9 @@ pip install -e .
 ## LinkedIn Recruiter CLI
 
 The package also installs `unipile-recruiter`, a JSON-first CLI for guarded
-LinkedIn Recruiter sourcing workflows using only Unipile v2.
+LinkedIn Recruiter workflows with explicit Unipile v1/v2 read selection. V2 is
+the default and the only backend that can mutate Recruiter. There is no
+automatic fallback between versions.
 
 Set credentials in environment variables; the API key is intentionally not
 accepted as a command-line argument:
@@ -157,7 +164,15 @@ unipile-recruiter open-to-work linkedin-public-slug
 unipile-recruiter search --body search.json --limit 25
 unipile-recruiter search-parameters LOCATION --keywords London
 unipile-recruiter pipeline PROJECT_ID --body '{"spotlights":["OPEN_TO_WORK"]}'
+unipile-recruiter applicants V2_PROJECT_ID --limit 100
+unipile-recruiter --backend v1 applicants V1_JOB_ID --limit 250
 ```
+
+`applicants` deliberately takes a V2 project ID on V2 and a V1 job ID on V1.
+The CLI never translates or reuses identifiers across versions. V1 requires
+explicit selection with `--backend v1` (or `UNIPILE_RECRUITER_BACKEND=v1`) and
+accepts only `accounts`, `doctor`, `projects`, `project`, `applicants`, and
+read-only `request` commands.
 
 Mutation commands are dry-runs by default. A candidate save first validates the
 project and prints the exact confirmation token:
@@ -183,12 +198,14 @@ requests also require an execution flag and exact confirmation token.
 Run `unipile-recruiter capabilities` for the supported surface and
 `python -m unittest discover -s tests` for the safety/unit tests.
 
-### v1 deprecation
+### v1 migration boundary
 
-The supported server and CLI no longer read `UNIPILE_DSN`,
-`UNIPILE_API_KEY`, `UNIPILE_V1_*`, or any dual-routing configuration. There is
-no automatic fallback to v1. The historical dual bridge remains only as
-unreferenced migration evidence; its gateway constructors fail closed.
+V1 is supported only as an explicitly selected, read-only historical audit
+backend. It never receives writes and is never used when a V2 call fails. Keep
+version-specific account, project, job, stage, profile, and candidate IDs
+separate. LinkedIn may reject concurrent Recruiter sessions with
+`errors/multiple_sessions`; stop and repair the connection rather than routing
+around that warning.
 
 ## License
 

@@ -1,4 +1,4 @@
-"""Guarded LinkedIn Recruiter operations for the Unipile v2 API."""
+"""Guarded LinkedIn Recruiter operations for the Unipile v1 and v2 APIs."""
 
 from __future__ import annotations
 
@@ -293,6 +293,33 @@ class RecruiterClient:
             body=body or {},
         )
 
+    def list_project_applicants(
+        self,
+        account_id: str,
+        project_id: str,
+        body: Optional[Mapping[str, Any]] = None,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """List a v2 project's applicant talent pool.
+
+        This provider read uses POST. It is intentionally a dedicated method so
+        callers do not have to weaken the generic mutation guard.
+        """
+        if not 1 <= limit <= 100:
+            raise ValueError("Unipile v2 applicant limit must be between 1 and 100")
+        account_id = self._account(account_id)
+        params: dict[str, Any] = {"limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        return self._request(
+            "POST",
+            f"/v2/{account_id}/linkedin/recruiter/projects/{project_id}/talent-pool/applicants",
+            params=params,
+            body=body or {},
+        )
+
     def save_candidate(
         self,
         account_id: str,
@@ -403,3 +430,158 @@ class RecruiterClient:
         if not path.startswith("/") or path.startswith("//"):
             raise ValueError("path must be an absolute API path beginning with one slash")
         return self._request(method, path, params=params, body=body)
+
+
+class V1RecruiterClient:
+    """Read-only client for explicit historical Recruiter migration audits.
+
+    V1 is never selected implicitly and this class exposes no mutation method.
+    Version-specific account, project, and job IDs must be supplied as V1 IDs.
+    """
+
+    api_version = "v1"
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        timeout: float = 60,
+        session: Optional[requests.Session] = None,
+    ) -> None:
+        self.base_url = normalize_base_url(base_url)
+        self.api_key = api_key
+        self.timeout = timeout
+        self.session = session or requests.Session()
+        self.headers = {"X-API-KEY": api_key, "accept": "application/json"}
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
+        if method.upper() not in READ_METHODS:
+            raise ValueError("Unipile v1 is read-only; mutation requests are disabled")
+        response = self.session.request(
+            method.upper(),
+            f"{self.base_url}{path}",
+            headers=self.headers,
+            params=dict(params or {}),
+            timeout=self.timeout,
+        )
+        if not response.ok:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            detail = (
+                payload.get("detail")
+                or payload.get("title")
+                or response.reason
+                or "Unipile request failed"
+            )
+            raise UnipileAPIError(
+                status_code=response.status_code,
+                error_type=payload.get("type"),
+                detail=str(detail),
+                retry_after=response.headers.get("Retry-After"),
+                request_id=payload.get("req_id") or response.headers.get("X-Request-ID"),
+            )
+        if response.status_code == 204 or not response.content:
+            return {"success": True}
+        return response.json()
+
+    @staticmethod
+    def _account(account_id: str) -> str:
+        if not account_id:
+            raise ValueError("Unipile v1 account ID must not be empty")
+        return account_id
+
+    def get_accounts(self) -> list[dict[str, Any]]:
+        data = self._request("GET", "/api/v1/accounts", params={"limit": 100})
+        if isinstance(data, list):
+            return list(data)
+        return list(data.get("items") or data.get("data") or [])
+
+    def discover_linkedin_account(self) -> str:
+        accounts = [
+            account
+            for account in self.get_accounts()
+            if str(account.get("type") or account.get("provider") or "").lower()
+            == "linkedin"
+        ]
+        if len(accounts) != 1:
+            raise ValueError(
+                f"Expected exactly one v1 LinkedIn account; found {len(accounts)}"
+            )
+        account_id = accounts[0].get("id")
+        if not account_id:
+            raise ValueError("The v1 LinkedIn account has no ID")
+        return str(account_id)
+
+    def list_projects(
+        self,
+        account_id: str,
+        *,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+        offset: Optional[int] = None,
+        keywords: Optional[str] = None,
+        status: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        if offset is not None:
+            raise ValueError("Unipile v1 project pagination uses cursor, not offset")
+        params: dict[str, Any] = {
+            "account_id": self._account(account_id),
+            "limit": limit,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        if keywords:
+            params["keywords"] = keywords
+        if status:
+            params["status"] = ",".join(status)
+        return self._request("GET", "/api/v1/linkedin/projects", params=params)
+
+    def get_project(self, account_id: str, project_id: str) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/api/v1/linkedin/projects/{project_id}",
+            params={"account_id": self._account(account_id)},
+        )
+
+    def list_job_applicants(
+        self,
+        account_id: str,
+        job_id: str,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = 250,
+    ) -> dict[str, Any]:
+        if not 1 <= limit <= 250:
+            raise ValueError("Unipile v1 applicant limit must be between 1 and 250")
+        params: dict[str, Any] = {
+            "account_id": self._account(account_id),
+            "service": "RECRUITER",
+            "limit": limit,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        return self._request(
+            "GET", f"/api/v1/linkedin/jobs/{job_id}/applicants", params=params
+        )
+
+    def direct_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        body: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
+        if body:
+            raise ValueError("Unipile v1 read-only requests do not accept a JSON body")
+        if not path.startswith("/api/v1/"):
+            raise ValueError("Unipile v1 request paths must begin with /api/v1/")
+        return self._request(method, path, params=params)

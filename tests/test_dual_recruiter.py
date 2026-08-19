@@ -11,103 +11,91 @@ from mcp_server_unipile.dual_recruiter import (
 
 
 class FakeRecruiterClient:
-    def __init__(self, version, projects=None):
+    def __init__(self, version, pages=None):
         self.api_version = version
-        self.projects = list(projects or [])
-        self.profile_calls = 0
-        self.saves = []
+        self.pages = list(pages or [{"items": []}])
+        self.calls = []
 
     def discover_linkedin_account(self):
         return f"{self.api_version}-account"
 
-    def list_projects(self, _account_id, **_kwargs):
-        return {"items": self.projects, "total_count": len(self.projects)}
-
-    def get_project(self, _account_id, project_id):
-        return next(item for item in self.projects if item["id"] == project_id)
-
-    def open_to_work(self, _account_id, identifier):
-        return {"public_identifier": identifier, "is_open_to_work": True, "profile_calls": 1}
-
-    def resolve_recruiter_profile(self, _account_id, identifier):
-        self.profile_calls += 1
-        return ({"candidate_id": identifier, "first_name": "Ada", "last_name": "Lovelace"}, 1)
-
-    def save_candidate(self, account_id, project_id, candidate_id, stage):
-        self.saves.append((account_id, project_id, candidate_id, stage))
-        return {"saved": True}
+    def list_projects(self, _account_id, **kwargs):
+        self.calls.append(kwargs)
+        return self.pages.pop(0)
 
 
-def config_with_project(writer="disabled"):
-    config = default_config()
-    config["write_backend"] = writer
-    config["projects"] = {
-        "strala_150": {
-            "name": "Strala 150",
-            "ids": {"v1": "v1-project", "v2": "v2-project"},
-            "stages": {
-                "uncontacted": {"v1": "UNCONTACTED", "v2": "stage-new"}
-            },
-        }
-    }
-    return config
-
-
-@unittest.skip("legacy dual v1/v2 bridge is deprecated and excluded from the supported package")
 class DualRecruiterTests(unittest.TestCase):
-    def make_gateway(self, writer="disabled"):
-        v1 = FakeRecruiterClient("v1", [{"id": "v1-project", "name": "Strala 150"}])
-        v2 = FakeRecruiterClient("v2", [{"id": "v2-project", "name": "Strala 150"}])
-        gateway = DualRecruiterGateway(
-            {"v1": Backend("v1", v1), "v2": Backend("v2", v2)},
-            config_with_project(writer),
-        )
-        return gateway, v1, v2
-
-    def test_default_config_prefers_v2_and_blocks_writes(self):
+    def test_default_config_blocks_writes(self):
         with TemporaryDirectory() as directory:
             config = load_dual_config(Path(directory) / "missing.json")
-        self.assertEqual(config["read_preference"], "v2")
         self.assertEqual(config["write_backend"], "disabled")
 
-    def test_open_to_work_prefers_v2_and_can_force_v1(self):
-        gateway, _v1, _v2 = self.make_gateway()
-        self.assertEqual(gateway.open_to_work("candidate")["reader"], "v2")
-        self.assertEqual(gateway.open_to_work("candidate", "v1")["reader"], "v1")
+    def test_v1_can_never_be_configured_as_writer(self):
+        config = default_config()
+        config["write_backend"] = "v1"
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "dual.json"
+            path.write_text(__import__("json").dumps(config))
+            with self.assertRaisesRegex(ValueError, "disabled or v2"):
+                load_dual_config(path)
 
-    def test_missing_v2_falls_back_to_v1(self):
+    def test_backend_selection_is_explicit_and_never_falls_back(self):
         v1 = FakeRecruiterClient("v1")
         gateway = DualRecruiterGateway(
             {"v1": Backend("v1", v1)}, default_config()
         )
-        self.assertEqual(gateway.open_to_work("candidate")["reader"], "v1")
+        self.assertIs(gateway.backend("v1").client, v1)
+        with self.assertRaisesRegex(ValueError, "v2 backend is not configured"):
+            gateway.backend("v2")
+        with self.assertRaisesRegex(ValueError, "explicitly set"):
+            gateway.backend("auto")
 
     def test_project_comparison_correlates_names_not_ids(self):
-        gateway, _v1, _v2 = self.make_gateway()
+        v1 = FakeRecruiterClient(
+            "v1", [{"items": [{"id": "v1-project", "name": "Strala 150"}]}]
+        )
+        v2 = FakeRecruiterClient(
+            "v2", [{"items": [{"id": "v2-project", "name": "Strala 150"}]}]
+        )
+        gateway = DualRecruiterGateway(
+            {"v1": Backend("v1", v1), "v2": Backend("v2", v2)},
+            default_config(),
+        )
         result = gateway.compare_projects()
         self.assertEqual(result["counts"]["matched"], 1)
         self.assertEqual(result["matched"][0]["v1_ids"], ["v1-project"])
         self.assertEqual(result["matched"][0]["v2_ids"], ["v2-project"])
 
-    def test_disabled_writer_blocks_before_profile_lookup(self):
-        gateway, v1, v2 = self.make_gateway()
-        with self.assertRaisesRegex(ValueError, "Writes are disabled"):
-            gateway.save_plan("candidate", "strala_150", "uncontacted")
-        self.assertEqual(v1.profile_calls + v2.profile_calls, 0)
-
-    def test_v2_is_the_only_writer_when_enabled(self):
-        gateway, v1, v2 = self.make_gateway("v2")
-        plan = gateway.save_plan("candidate", "strala_150", "uncontacted")
-        self.assertEqual(plan["writer"], "v2")
-        self.assertEqual(plan["project_id"], "v2-project")
-        self.assertEqual(plan["stage"], "stage-new")
-        self.assertNotIn("account_id", plan)
-        gateway.execute_save(plan)
-        self.assertEqual(v1.saves, [])
-        self.assertEqual(
-            v2.saves,
-            [("v2-account", "v2-project", "candidate", "stage-new")],
+    def test_v1_project_pagination_uses_provider_cursors(self):
+        v1 = FakeRecruiterClient(
+            "v1",
+            [
+                {"items": [{"id": "one"}], "cursor": "next"},
+                {"items": [{"id": "two"}]},
+            ],
         )
+        gateway = DualRecruiterGateway(
+            {"v1": Backend("v1", v1)}, default_config()
+        )
+        self.assertEqual([row["id"] for row in gateway.all_projects("v1")], ["one", "two"])
+        self.assertIsNone(v1.calls[0]["cursor"])
+        self.assertEqual(v1.calls[1]["cursor"], "next")
+
+    def test_write_backend_is_disabled_or_v2_only(self):
+        v1 = FakeRecruiterClient("v1")
+        gateway = DualRecruiterGateway(
+            {"v1": Backend("v1", v1)}, default_config()
+        )
+        with self.assertRaisesRegex(ValueError, "Writes are disabled"):
+            gateway.write_backend()
+
+        config = default_config()
+        config["write_backend"] = "v2"
+        v2 = FakeRecruiterClient("v2")
+        gateway = DualRecruiterGateway(
+            {"v1": Backend("v1", v1), "v2": Backend("v2", v2)}, config
+        )
+        self.assertIs(gateway.write_backend().client, v2)
 
 
 if __name__ == "__main__":

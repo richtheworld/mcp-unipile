@@ -14,12 +14,14 @@ from .recruiter_client import (
     READ_METHODS,
     RecruiterClient,
     UnipileAPIError,
+    V1RecruiterClient,
 )
 
 
 CAPABILITIES = {
     "read_only": [
         "accounts",
+        "applicants (v1 job IDs or v2 project IDs)",
         "profiles and Recruiter Open to Work",
         "projects list/get",
         "Recruiter people search",
@@ -35,13 +37,22 @@ CAPABILITIES = {
         "raw LinkedIn proxy writes",
         "arbitrary non-read API requests",
     ],
-    "api": "Unipile v2 only",
+    "api": {
+        "default": "v2",
+        "select_with": "--backend v1|v2",
+        "fallback": "disabled",
+        "v1": "explicit read-only historical audit",
+        "v2": "production reads and the only mutation backend",
+    },
     "control_plane": [
-        "UNIPILE_V2_API_KEY is the only accepted credential",
-        "UNIPILE_V2_LINKEDIN_ACCOUNT_ID can pin the connected Recruiter account",
+        "each backend loads only its version-specific credentials and account ID",
         "mutations require an exact dry-run confirmation token",
+        "v1 and v2 IDs are never translated or reused implicitly",
     ],
 }
+
+
+V1_COMMANDS = {"accounts", "doctor", "projects", "project", "applicants", "request"}
 
 
 def load_json(value: Optional[str]) -> dict[str, Any]:
@@ -73,14 +84,18 @@ def require_mutation(args: argparse.Namespace, token: str) -> None:
 
 def add_connection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "--backend",
+        choices=("v1", "v2"),
+        default=os.getenv("UNIPILE_RECRUITER_BACKEND", "v2"),
+        help="Explicit API backend; defaults to v2 and never falls back",
+    )
+    parser.add_argument(
         "--base-url",
-        default=os.getenv("UNIPILE_V2_BASE_URL", DEFAULT_BASE_URL),
-        help="Unipile v2 base URL; defaults to https://api.unipile.com",
+        help="Override the selected backend's environment-configured base URL",
     )
     parser.add_argument(
         "--account-id",
-        default=os.getenv("UNIPILE_V2_LINKEDIN_ACCOUNT_ID"),
-        help="Unipile v2 LinkedIn account ID; auto-discovers when exactly one is running",
+        help="Version-specific LinkedIn account ID; auto-discovers when unambiguous",
     )
     parser.add_argument("--compact", action="store_true", help="Emit compact JSON")
 
@@ -93,7 +108,7 @@ def add_mutation_args(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="unipile-recruiter",
-        description="Guarded LinkedIn Recruiter CLI for Unipile v2",
+        description="Guarded LinkedIn Recruiter CLI with explicit Unipile v1/v2 selection",
     )
     add_connection_args(parser)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -110,6 +125,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     project = sub.add_parser("project", help="Get one Recruiter project")
     project.add_argument("project_id")
+
+    applicants = sub.add_parser(
+        "applicants",
+        help="List applicants using a v1 job ID or v2 project ID",
+    )
+    applicants.add_argument(
+        "resource_id", help="V1 job ID when --backend v1; V2 project ID when --backend v2"
+    )
+    applicants.add_argument("--limit", type=int)
+    applicants.add_argument("--cursor")
+    applicants.add_argument(
+        "--body", help="Optional v2 filter JSON object/file/-; unsupported by v1"
+    )
 
     create = sub.add_parser("project-create", help="Create a Recruiter project")
     create.add_argument("--body", required=True, help="JSON object, file path, or -")
@@ -193,18 +221,42 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def get_client(args: argparse.Namespace) -> RecruiterClient:
+def get_client(args: argparse.Namespace) -> RecruiterClient | V1RecruiterClient:
+    if args.backend == "v1":
+        api_key = os.getenv("UNIPILE_V1_API_KEY") or os.getenv("UNIPILE_API_KEY")
+        base_url = (
+            args.base_url
+            or os.getenv("UNIPILE_V1_BASE_URL")
+            or os.getenv("UNIPILE_V1_DSN")
+            or os.getenv("UNIPILE_BASE_URL")
+            or os.getenv("UNIPILE_DSN")
+        )
+        if not api_key or not base_url:
+            raise ValueError(
+                "Set UNIPILE_V1_API_KEY and UNIPILE_V1_BASE_URL for explicit v1 reads"
+            )
+        return V1RecruiterClient(api_key=api_key, base_url=base_url)
     api_key = os.getenv("UNIPILE_V2_API_KEY")
     if not api_key:
-        raise ValueError(
-            "Set UNIPILE_V2_API_KEY; v1 and legacy UNIPILE_API_KEY values are not accepted"
-        )
-    return RecruiterClient(api_key=api_key, base_url=args.base_url)
+        raise ValueError("Set UNIPILE_V2_API_KEY for v2 operations")
+    return RecruiterClient(
+        api_key=api_key,
+        base_url=args.base_url or os.getenv("UNIPILE_V2_BASE_URL", DEFAULT_BASE_URL),
+    )
 
 
-def account_id(client: RecruiterClient, args: argparse.Namespace) -> str:
+def account_id(
+    client: RecruiterClient | V1RecruiterClient, args: argparse.Namespace
+) -> str:
     if args.account_id:
         return args.account_id
+    configured = (
+        os.getenv("UNIPILE_V1_LINKEDIN_ACCOUNT_ID")
+        if args.backend == "v1"
+        else os.getenv("UNIPILE_V2_LINKEDIN_ACCOUNT_ID")
+    )
+    if configured:
+        return configured
     return client.discover_linkedin_account()
 
 
@@ -221,6 +273,12 @@ def dry_run(operation: str, token: str, request: Mapping[str, Any], **extra: Any
 def execute(args: argparse.Namespace) -> Any:
     if args.command == "capabilities":
         return CAPABILITIES
+    if args.backend == "v1" and args.command not in V1_COMMANDS:
+        raise ValueError(
+            f"{args.command} is unavailable on the read-only v1 audit backend; use --backend v2"
+        )
+    if args.backend == "v1" and args.command == "request" and args.method not in READ_METHODS:
+        raise ValueError("Unipile v1 is read-only; mutation requests are disabled")
     client = get_client(args)
     if args.command == "accounts":
         return {"api_version": client.api_version, "items": client.get_accounts()}
@@ -229,6 +287,25 @@ def execute(args: argparse.Namespace) -> Any:
     if args.command == "doctor":
         accounts = client.get_accounts()
         account = next((item for item in accounts if item.get("id") == aid), {})
+        if args.backend == "v1":
+            projects_error = None
+            projects = {}
+            try:
+                projects = client.list_projects(aid, limit=1)
+            except UnipileAPIError as error:
+                projects_error = error.as_dict()
+            return {
+                "ok": bool(account) and projects_error is None,
+                "api_version": "v1",
+                "historical_audit_only": True,
+                "automatic_fallback": False,
+                "account_resolved": bool(aid),
+                "recruiter_projects_accessible": projects_error is None,
+                "project_count": projects.get("total_count")
+                or projects.get("paging", {}).get("total"),
+                "projects_error": projects_error,
+            }
+        assert isinstance(client, RecruiterClient)
         contracts = client.get_linkedin_contracts(aid)
         recruiter_contracts = [
             item
@@ -272,6 +349,52 @@ def execute(args: argparse.Namespace) -> Any:
         )
     if args.command == "project":
         return client.get_project(aid, args.project_id)
+    if args.command == "applicants":
+        if args.backend == "v1":
+            assert isinstance(client, V1RecruiterClient)
+            if args.body:
+                raise ValueError("--body is unsupported for v1 applicant reads")
+            return client.list_job_applicants(
+                aid,
+                args.resource_id,
+                cursor=args.cursor,
+                limit=args.limit or 250,
+            )
+        assert isinstance(client, RecruiterClient)
+        return client.list_project_applicants(
+            aid,
+            args.resource_id,
+            load_json(args.body),
+            cursor=args.cursor,
+            limit=args.limit or 100,
+        )
+    if args.command == "request":
+        params = load_json(args.params)
+        body = load_json(args.body)
+        token = f"REQUEST_{args.method}"
+        if args.backend == "v1":
+            assert isinstance(client, V1RecruiterClient)
+            return client.direct_request(
+                args.method, args.path, params=params, body=body
+            )
+        assert isinstance(client, RecruiterClient)
+        if args.method not in READ_METHODS and not args.execute:
+            return dry_run(
+                "direct-request",
+                token,
+                {
+                    "method": args.method,
+                    "path": args.path,
+                    "params": params,
+                    "body": body,
+                },
+            )
+        if args.method not in READ_METHODS:
+            require_mutation(args, token)
+        return client.direct_request(
+            args.method, args.path, params=params, body=body
+        )
+    assert isinstance(client, RecruiterClient)
     if args.command == "project-create":
         body = load_json(args.body)
         token = "CREATE_PROJECT"
@@ -374,17 +497,6 @@ def execute(args: argparse.Namespace) -> Any:
         if embedded_method not in READ_METHODS:
             require_mutation(args, token)
         return client.proxy_request(aid, body)
-    if args.command == "request":
-        params = load_json(args.params)
-        body = load_json(args.body)
-        token = f"REQUEST_{args.method}"
-        if args.method not in READ_METHODS and not args.execute:
-            return dry_run(
-                "direct-request", token, {"method": args.method, "path": args.path, "params": params, "body": body}
-            )
-        if args.method not in READ_METHODS:
-            require_mutation(args, token)
-        return client.direct_request(args.method, args.path, params=params, body=body)
     raise ValueError(f"Unknown command: {args.command}")
 
 

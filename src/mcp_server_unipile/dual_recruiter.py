@@ -1,8 +1,7 @@
-"""Deprecated legacy v1/v2 bridge.
+"""Explicit Unipile v1/v2 Recruiter migration bridge.
 
-This module is intentionally excluded from the package's supported surface.
-Use :mod:`mcp_server_unipile.recruiter_client` and the v2-only
-``unipile-recruiter`` CLI instead.
+The bridge never falls back between versions. V1 is available only for
+read-only historical audits, while V2 remains the sole possible writer.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from .recruiter_client import RecruiterClient
+from .recruiter_client import RecruiterClient, V1RecruiterClient
 
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "unipile-recruiter" / "dual.json"
@@ -22,7 +21,6 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "unipile-recruiter" / "dual.json
 def default_config() -> dict[str, Any]:
     return {
         "schema_version": 1,
-        "read_preference": "v2",
         "write_backend": "disabled",
         "accounts": {"v1": None, "v2": None},
         "projects": {},
@@ -38,17 +36,15 @@ def load_dual_config(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
         config.update(loaded)
     if config.get("schema_version") != 1:
         raise ValueError("Unsupported dual configuration schema_version")
-    if config.get("read_preference") not in {"v1", "v2"}:
-        raise ValueError("read_preference must be v1 or v2")
-    if config.get("write_backend") not in {"disabled", "v1", "v2"}:
-        raise ValueError("write_backend must be disabled, v1, or v2")
+    if config.get("write_backend") not in {"disabled", "v2"}:
+        raise ValueError("write_backend must be disabled or v2")
     return config
 
 
 @dataclass
 class Backend:
     version: str
-    client: RecruiterClient
+    client: RecruiterClient | V1RecruiterClient
     account_id: Optional[str] = None
 
     def resolve_account(self) -> str:
@@ -59,7 +55,7 @@ class Backend:
 
 
 class DualRecruiterGateway:
-    """Retained migration evidence; construction is permanently disabled."""
+    """Hold both clients while requiring an explicit version for every read."""
 
     def __init__(
         self,
@@ -67,24 +63,24 @@ class DualRecruiterGateway:
         config: Mapping[str, Any],
         config_path: Path = DEFAULT_CONFIG_PATH,
     ) -> None:
-        raise RuntimeError(
-            "The dual V1/V2 gateway is retired; use the V2-only RecruiterClient"
-        )
         self.backends = dict(backends)
         self.config = dict(config)
         self.config_path = config_path
+        for version, backend in self.backends.items():
+            if (
+                version not in {"v1", "v2"}
+                or backend.version != version
+                or backend.client.api_version != version
+            ):
+                raise ValueError("Backend keys and client versions must match")
 
     @classmethod
     def from_env(
         cls, config_path: Path = DEFAULT_CONFIG_PATH
     ) -> "DualRecruiterGateway":
-        raise RuntimeError(
-            "The dual V1/V2 gateway is retired; use the V2-only RecruiterClient"
-        )
         config = load_dual_config(config_path)
         accounts = config.get("accounts") or {}
         backends: dict[str, Backend] = {}
-
         v1_base = (
             os.getenv("UNIPILE_V1_BASE_URL")
             or os.getenv("UNIPILE_V1_DSN")
@@ -95,29 +91,34 @@ class DualRecruiterGateway:
         if v1_base and v1_key:
             backends["v1"] = Backend(
                 "v1",
-                RecruiterClient(v1_base, v1_key, "v1"),
+                V1RecruiterClient(api_key=v1_key, base_url=v1_base),
                 os.getenv("UNIPILE_V1_LINKEDIN_ACCOUNT_ID") or accounts.get("v1"),
             )
-
         v2_key = os.getenv("UNIPILE_V2_API_KEY")
         if v2_key:
             backends["v2"] = Backend(
                 "v2",
                 RecruiterClient(
-                    os.getenv("UNIPILE_V2_BASE_URL", "https://api.unipile.com"),
-                    v2_key,
-                    "v2",
+                    api_key=v2_key,
+                    base_url=os.getenv("UNIPILE_V2_BASE_URL", "https://api.unipile.com"),
                 ),
                 os.getenv("UNIPILE_V2_LINKEDIN_ACCOUNT_ID") or accounts.get("v2"),
             )
         return cls(backends, config, config_path)
 
+    def backend(self, version: str) -> Backend:
+        if version not in {"v1", "v2"}:
+            raise ValueError("version must be explicitly set to v1 or v2")
+        backend = self.backends.get(version)
+        if not backend:
+            raise ValueError(f"{version} backend is not configured")
+        return backend
+
     def status(self, live: bool = False) -> dict[str, Any]:
         result: dict[str, Any] = {
             "config_path": str(self.config_path),
-            "read_preference": self.config["read_preference"],
+            "automatic_fallback": False,
             "write_backend": self.config["write_backend"],
-            "one_writer_enforced": True,
             "backends": {},
         }
         for version in ("v1", "v2"):
@@ -130,76 +131,50 @@ class DualRecruiterGateway:
                     state.update(
                         {
                             "reachable": True,
-                            "account_resolved": bool(account_id),
+                            "account_resolved": True,
                             "recruiter_projects_accessible": True,
                             "project_count": projects.get("total_count")
                             or (projects.get("paging") or {}).get("total"),
                         }
                     )
                 except Exception as error:
-                    state.update(
-                        {
-                            "reachable": False,
-                            "error": type(error).__name__,
-                        }
-                    )
+                    state.update({"reachable": False, "error": type(error).__name__})
             result["backends"][version] = state
-        writer = self.config["write_backend"]
-        result["writes_ready"] = writer in self.backends
-        if writer == "disabled":
-            result["writes_blocked_reason"] = "write_backend_is_disabled"
-        elif writer not in self.backends:
-            result["writes_blocked_reason"] = f"{writer}_credentials_not_configured"
+        result["writes_ready"] = (
+            self.config["write_backend"] == "v2" and "v2" in self.backends
+        )
         return result
 
-    def read_backend(self, preferred: Optional[str] = None) -> Backend:
-        order = [preferred or self.config["read_preference"]]
-        order.append("v1" if order[0] == "v2" else "v2")
-        for version in order:
-            if version in self.backends:
-                return self.backends[version]
-        raise ValueError("No Unipile backend is configured")
-
-    def write_backend(self) -> Backend:
-        version = self.config["write_backend"]
-        if version == "disabled":
-            raise ValueError("Writes are disabled; set write_backend to v1 or v2 after validation")
-        backend = self.backends.get(version)
-        if not backend:
-            raise ValueError(f"Configured writer {version} has no credentials")
-        return backend
-
-    def open_to_work(
-        self, identifier: str, preferred: Optional[str] = None
-    ) -> dict[str, Any]:
-        """Route a Recruiter Open-to-Work read through the preferred backend."""
-        backend = self.read_backend(preferred)
-        result = backend.client.open_to_work(backend.resolve_account(), identifier)
-        return {"reader": backend.version, **result}
-
     @staticmethod
-    def _project_items(data: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _items(data: Mapping[str, Any]) -> list[dict[str, Any]]:
         return list(data.get("items") or data.get("data") or [])
 
     def all_projects(self, version: str) -> list[dict[str, Any]]:
-        backend = self.backends.get(version)
-        if not backend:
-            raise ValueError(f"{version} backend is not configured")
+        backend = self.backend(version)
         account_id = backend.resolve_account()
         items: list[dict[str, Any]] = []
         if version == "v1":
             cursor: Optional[str] = None
+            seen: set[str] = set()
             while True:
-                page = backend.client.list_projects(account_id, limit=100, cursor=cursor)
-                items.extend(self._project_items(page))
-                cursor = page.get("cursor")
-                if not cursor:
+                page = backend.client.list_projects(
+                    account_id, limit=100, cursor=cursor
+                )
+                items.extend(self._items(page))
+                next_cursor = page.get("next_cursor") or page.get("cursor")
+                if not next_cursor:
                     break
+                cursor = str(next_cursor)
+                if cursor in seen:
+                    raise ValueError("v1 project pagination repeated a cursor")
+                seen.add(cursor)
         else:
             offset = 0
             while True:
-                page = backend.client.list_projects(account_id, limit=100, offset=offset)
-                batch = self._project_items(page)
+                page = backend.client.list_projects(
+                    account_id, limit=100, offset=offset
+                )
+                batch = self._items(page)
                 items.extend(batch)
                 if len(batch) < 100:
                     break
@@ -213,19 +188,17 @@ class DualRecruiterGateway:
     def compare_projects(self) -> dict[str, Any]:
         v1 = self.all_projects("v1")
         v2 = self.all_projects("v2")
-        by_v1: dict[str, list[dict[str, Any]]] = {}
-        by_v2: dict[str, list[dict[str, Any]]] = {}
-        for item in v1:
-            by_v1.setdefault(self._normalize_name(str(item.get("name", ""))), []).append(item)
-        for item in v2:
-            by_v2.setdefault(self._normalize_name(str(item.get("name", ""))), []).append(item)
-        names = set(by_v1) | set(by_v2)
-        matched = []
-        only_v1 = []
-        only_v2 = []
-        ambiguous = []
-        for name in sorted(names):
-            left, right = by_v1.get(name, []), by_v2.get(name, [])
+        grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        for version, rows in (("v1", v1), ("v2", v2)):
+            for item in rows:
+                name = self._normalize_name(str(item.get("name", "")))
+                grouped.setdefault(name, {"v1": [], "v2": []})[version].append(item)
+        matched: list[dict[str, Any]] = []
+        only_v1: list[dict[str, Any]] = []
+        only_v2: list[dict[str, Any]] = []
+        ambiguous: list[dict[str, Any]] = []
+        for name in sorted(grouped):
+            left, right = grouped[name]["v1"], grouped[name]["v2"]
             summary = {
                 "name": (left or right)[0].get("name"),
                 "v1_ids": [item.get("id") for item in left],
@@ -254,77 +227,30 @@ class DualRecruiterGateway:
             "ambiguous": ambiguous,
         }
 
-    def project_binding(self, project_key: str) -> dict[str, Any]:
-        projects = self.config.get("projects") or {}
-        binding = projects.get(project_key)
-        if not isinstance(binding, dict):
-            raise ValueError(f"Unknown logical project key: {project_key}")
-        return binding
-
-    def resolve_bound_project(self, version: str, project_key: str) -> tuple[str, dict[str, Any]]:
-        binding = self.project_binding(project_key)
-        ids = binding.get("ids") or {}
-        project_id = ids.get(version)
-        if not project_id:
-            raise ValueError(f"Project {project_key} has no {version} ID mapping")
-        backend = self.backends.get(version)
-        if not backend:
-            raise ValueError(f"{version} backend is not configured")
-        project = backend.client.get_project(backend.resolve_account(), str(project_id))
-        return str(project_id), project
-
-    def save_plan(
-        self, identifier: str, project_key: str, stage_key: str
+    def list_applicants(
+        self,
+        version: str,
+        resource_id: str,
+        *,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+        body: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
-        backend = self.write_backend()
-        version = backend.version
-        binding = self.project_binding(project_key)
-        project_id, project = self.resolve_bound_project(version, project_key)
-        stages = binding.get("stages") or {}
-        stage_binding = stages.get(stage_key) or {}
-        stage = stage_binding.get(version)
-        if not stage:
-            raise ValueError(
-                f"Project {project_key} stage {stage_key} has no {version} mapping"
+        backend = self.backend(version)
+        account_id = backend.resolve_account()
+        if version == "v1":
+            if body:
+                raise ValueError("v1 applicant reads do not accept a v2 filter body")
+            assert isinstance(backend.client, V1RecruiterClient)
+            return backend.client.list_job_applicants(
+                account_id, resource_id, cursor=cursor, limit=limit or 250
             )
-        profile, profile_calls = backend.client.resolve_recruiter_profile(
-            backend.resolve_account(), identifier
+        assert isinstance(backend.client, RecruiterClient)
+        return backend.client.list_project_applicants(
+            account_id, resource_id, body, cursor=cursor, limit=limit or 100
         )
-        candidate_id = (
-            profile.get("candidate_id")
-            or profile.get("provider_id")
-            or profile.get("id")
-        )
-        if not candidate_id:
-            raise ValueError("Recruiter profile did not return a candidate/profile ID")
-        return {
-            "writer": version,
-            "candidate_id": str(candidate_id),
-            "identity": {
-                "first_name": profile.get("first_name"),
-                "last_name": profile.get("last_name"),
-                "public_identifier": profile.get("public_identifier"),
-            },
-            "project_key": project_key,
-            "project_id": project_id,
-            "project_name": project.get("name"),
-            "stage_key": stage_key,
-            "stage": str(stage),
-            "profile_calls": profile_calls,
-        }
 
-    def execute_save(self, plan: Mapping[str, Any]) -> dict[str, Any]:
-        backend = self.write_backend()
-        if backend.version != plan.get("writer"):
-            raise ValueError("Write backend changed after plan generation")
-        result = backend.client.save_candidate(
-            backend.resolve_account(),
-            str(plan["project_id"]),
-            str(plan["candidate_id"]),
-            str(plan["stage"]),
-        )
-        return {
-            "success": True,
-            "writer": backend.version,
-            "result": result,
-        }
+    def write_backend(self) -> Backend:
+        if self.config.get("write_backend") != "v2":
+            raise ValueError("Writes are disabled; v2 must be explicitly configured")
+        return self.backend("v2")

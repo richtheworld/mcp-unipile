@@ -7,6 +7,7 @@ from mcp_server_unipile.recruiter_cli import build_parser, execute
 from mcp_server_unipile.recruiter_client import (
     RecruiterClient,
     UnipileAPIError,
+    V1RecruiterClient,
     normalize_base_url,
 )
 
@@ -89,6 +90,53 @@ class RecruiterClientTests(unittest.TestCase):
         self.assertIn("/v2/acc_123/linkedin/recruiter/search/people", call.args[1])
         self.assertEqual(call.kwargs["json"], {"keywords": "FDE"})
 
+    def test_v2_applicants_use_project_post_read_contract(self):
+        session = Mock()
+        session.request.return_value = FakeResponse(payload={"data": []})
+        client = RecruiterClient(api_key="secret", session=session)
+        client.list_project_applicants(
+            "acc_123", "project-1", {"sort_by": "NEWEST_FIRST"}, limit=100
+        )
+        call = session.request.call_args
+        self.assertEqual(call.args[0], "POST")
+        self.assertIn(
+            "/v2/acc_123/linkedin/recruiter/projects/project-1/talent-pool/applicants",
+            call.args[1],
+        )
+        self.assertEqual(call.kwargs["params"], {"limit": 100})
+        self.assertEqual(call.kwargs["json"], {"sort_by": "NEWEST_FIRST"})
+
+    def test_v1_applicants_use_job_get_and_cursor(self):
+        session = Mock()
+        session.request.return_value = FakeResponse(
+            payload={"items": [], "total_count": 0}
+        )
+        client = V1RecruiterClient(
+            api_key="secret", base_url="https://api1.unipile.com:13111", session=session
+        )
+        client.list_job_applicants(
+            "legacy-account", "job-1", cursor="page-2", limit=250
+        )
+        call = session.request.call_args
+        self.assertEqual(call.args[0], "GET")
+        self.assertTrue(call.args[1].endswith("/api/v1/linkedin/jobs/job-1/applicants"))
+        self.assertEqual(
+            call.kwargs["params"],
+            {
+                "account_id": "legacy-account",
+                "service": "RECRUITER",
+                "limit": 250,
+                "cursor": "page-2",
+            },
+        )
+
+    def test_v1_client_rejects_all_mutation_methods(self):
+        client = V1RecruiterClient(
+            api_key="secret", base_url="https://api1.unipile.com:13111"
+        )
+        with self.assertRaisesRegex(ValueError, "read-only"):
+            client.direct_request("POST", "/api/v1/linkedin/projects")
+
     def test_recruiter_resolution_uses_v2_classic_id(self):
         client = RecruiterClient(api_key="secret")
         client.get_profile = Mock(
@@ -168,6 +216,38 @@ class RecruiterClientTests(unittest.TestCase):
                 os.environ["UNIPILE_V2_API_KEY"] = original
         self.assertTrue(result["dry_run"])
         self.assertEqual(result["execute_with"]["confirm"], "SAVE:p1:candidate-123")
+
+    def test_cli_defaults_to_v2_and_can_explicitly_select_v1(self):
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["accounts"]).backend, "v2")
+        self.assertEqual(
+            parser.parse_args(["--backend", "v1", "accounts"]).backend, "v1"
+        )
+
+    def test_cli_blocks_v1_mutation_before_loading_credentials(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "--backend",
+                "v1",
+                "save",
+                "candidate-123",
+                "--project",
+                "p1",
+                "--stage",
+                "stage-1",
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "read-only v1 audit backend"):
+            execute(args)
+
+    def test_cli_v1_request_blocks_post_before_loading_credentials(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            ["--backend", "v1", "request", "POST", "/api/v1/linkedin/projects"]
+        )
+        with self.assertRaisesRegex(ValueError, "read-only"):
+            execute(args)
 
 
 if __name__ == "__main__":
