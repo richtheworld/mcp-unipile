@@ -151,7 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
     profile = sub.add_parser("profile", help="Retrieve a LinkedIn profile variant")
     profile.add_argument(
         "identifier",
-        help="Provider-issued user ID or LinkedIn /in/ slug; not a Recruiter URL",
+        help="Provider user ID, LinkedIn /in/ profile, or Recruiter profile URL",
     )
     profile.add_argument(
         "--variant", choices=("classic", "recruiter", "sales_navigator"), default="recruiter"
@@ -160,7 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
     otw = sub.add_parser("open-to-work", help="Check Recruiter-visible Open to Work")
     otw.add_argument(
         "identifier",
-        help="Recruiter candidate ID or LinkedIn /in/ slug; not a Recruiter URL",
+        help="Candidate ID, LinkedIn /in/ profile, or Recruiter profile URL",
     )
 
     search = sub.add_parser("search", help="Perform structured Recruiter people search")

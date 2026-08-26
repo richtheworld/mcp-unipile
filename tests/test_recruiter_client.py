@@ -38,14 +38,26 @@ class RecruiterClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must start with acc_"):
             client.get_project("legacy_MESSAGING", "project-1")
 
-    def test_profile_identifier_normalizes_public_slug_and_rejects_recruiter_url(self):
+    def test_profile_identifier_normalizes_public_and_recruiter_profile_urls(self):
         self.assertEqual(
             normalize_profile_identifier("https://www.linkedin.com/in/ada-lovelace/?x=1"),
             "ada-lovelace",
         )
-        with self.assertRaisesRegex(ValueError, "Recruiter URL"):
+        self.assertEqual(
             normalize_profile_identifier(
-                "https://www.linkedin.com/talent/profile/AE-recruiter-id"
+                "https://www.linkedin.com/talent/profile/AE-recruiter-id?searchRequestId=1"
+            ),
+            "AE-recruiter-id",
+        )
+        self.assertEqual(
+            normalize_profile_identifier(
+                "https://www.linkedin.com/recruiter/profile/476162262,HHNH,name"
+            ),
+            "476162262",
+        )
+        with self.assertRaisesRegex(ValueError, "search-url command"):
+            normalize_profile_identifier(
+                "https://www.linkedin.com/talent/search?keywords=ada"
             )
         for encoded_delimiter in ("%2F", "%3F", "%23"):
             with self.subTest(encoded_delimiter=encoded_delimiter):
@@ -181,6 +193,26 @@ class RecruiterClientTests(unittest.TestCase):
         self.assertEqual(
             client.get_profile.call_args_list[2].args,
             ("acc_123", "ACoA-classic-id", "recruiter"),
+        )
+
+    def test_recruiter_profile_url_resolves_directly_to_embedded_candidate_id(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(
+            return_value={"id": "AE-recruiter-id", "is_open_to_work": True}
+        )
+
+        result = client.open_to_work(
+            "acc_123",
+            "https://www.linkedin.com/talent/profile/AE-recruiter-id?searchRequestId=1",
+        )
+
+        self.assertTrue(result["is_open_to_work"])
+        self.assertEqual(result["requested_identifier"], "AE-recruiter-id")
+        self.assertEqual(result["provider_id"], "AE-recruiter-id")
+        self.assertEqual(result["profile_calls"], 1)
+        self.assertEqual(
+            client.get_profile.call_args.args,
+            ("acc_123", "AE-recruiter-id", "recruiter"),
         )
 
     def test_open_to_work_reads_linkedin_specifics(self):

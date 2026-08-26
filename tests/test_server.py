@@ -74,6 +74,24 @@ class UnipileWrapperTests(unittest.TestCase):
             ],
         )
 
+    def test_recruiter_profile_url_routes_embedded_id_directly_to_recruiter(self):
+        wrapper = UnipileWrapper.__new__(UnipileWrapper)
+        wrapper.client = RecordingProfileClient()
+
+        result = json.loads(
+            wrapper.get_linkedin_open_to_work(
+                "acc_123",
+                "https://www.linkedin.com/talent/profile/AE123456789?searchRequestId=1",
+            )
+        )
+
+        self.assertTrue(result["is_open_to_work"])
+        self.assertEqual(result["requested_identifier"], "https://www.linkedin.com/talent/profile/AE123456789?searchRequestId=1")
+        self.assertEqual(
+            wrapper.client.calls,
+            [("acc_123", "AE123456789", "recruiter")],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
