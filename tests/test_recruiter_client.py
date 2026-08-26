@@ -9,6 +9,7 @@ from mcp_server_unipile.recruiter_client import (
     UnipileAPIError,
     V1RecruiterClient,
     normalize_base_url,
+    normalize_profile_identifier,
 )
 
 
@@ -36,6 +37,32 @@ class RecruiterClientTests(unittest.TestCase):
         client = RecruiterClient(api_key="secret")
         with self.assertRaisesRegex(ValueError, "must start with acc_"):
             client.get_project("legacy_MESSAGING", "project-1")
+
+    def test_profile_identifier_normalizes_public_slug_and_rejects_recruiter_url(self):
+        self.assertEqual(
+            normalize_profile_identifier("https://www.linkedin.com/in/ada-lovelace/?x=1"),
+            "ada-lovelace",
+        )
+        with self.assertRaisesRegex(ValueError, "Recruiter URL"):
+            normalize_profile_identifier(
+                "https://www.linkedin.com/talent/profile/AE-recruiter-id"
+            )
+        for encoded_delimiter in ("%2F", "%3F", "%23"):
+            with self.subTest(encoded_delimiter=encoded_delimiter):
+                with self.assertRaisesRegex(ValueError, "encoded URL delimiter"):
+                    normalize_profile_identifier(
+                        f"https://www.linkedin.com/in/ada{encoded_delimiter}admin"
+                    )
+
+        client = RecruiterClient(api_key="secret")
+        client._request = Mock(return_value={"id": "ACoA-classic-id"})
+        client.get_profile(
+            "acc_123", "https://www.linkedin.com/in/ada-lovelace/", "classic"
+        )
+        self.assertEqual(
+            client._request.call_args.args[1],
+            "/v2/acc_123/users/ada-lovelace",
+        )
 
     def test_v2_save_candidate_payload(self):
         session = Mock()
@@ -169,6 +196,165 @@ class RecruiterClientTests(unittest.TestCase):
 
         self.assertTrue(result["is_open_to_work"])
         self.assertEqual(result["profile_calls"], 1)
+        self.assertEqual(result["recruiter_search_calls"], 0)
+        self.assertEqual(result["is_open_to_work_source"], "profile")
+
+    @staticmethod
+    def _profile_with_missing_signal():
+        return {
+            "id": "AE-recruiter-id",
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "specifics": {"is_open_to_work": None},
+            "work_experience": [
+                {
+                    "role": "Engineer",
+                    "ended_on": None,
+                    "company": {"id": "company-1", "name": "Analytical Engines"},
+                }
+            ],
+        }
+
+    def test_open_to_work_uses_exact_spotlight_positive_when_profile_is_null(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(return_value=self._profile_with_missing_signal())
+        client.search_people = Mock(
+            side_effect=[
+                {"data": [{"id": "AE-recruiter-id"}], "total_count": 1},
+                {"data": [{"id": "AE-recruiter-id"}], "total_count": 1},
+            ]
+        )
+
+        result = client.open_to_work("acc_123", "AE-recruiter-id")
+
+        self.assertTrue(result["is_open_to_work"])
+        self.assertEqual(result["is_open_to_work_source"], "recruiter_search_spotlight")
+        self.assertEqual(result["search_fallback_status"], "exact_positive")
+        self.assertEqual(result["recruiter_search_calls"], 2)
+        self.assertEqual(
+            client.search_people.call_args_list[0].args[1],
+            {
+                "first_name": ["Ada"],
+                "last_name": ["Lovelace"],
+                "current_company": [{"id": "company-1", "priority": "MUST_HAVE"}],
+                "job_title": [
+                    {
+                        "name": "Engineer",
+                        "priority": "MUST_HAVE",
+                        "preferences": "CURRENT",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(
+            client.search_people.call_args_list[1].args[1]["spotlights"],
+            ["OPEN_TO_WORK"],
+        )
+
+    def test_open_to_work_uses_complete_exact_search_for_negative(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(return_value=self._profile_with_missing_signal())
+        client.search_people = Mock(
+            side_effect=[
+                {"data": [{"id": "AE-recruiter-id"}], "total_count": 1},
+                {"data": [], "total_count": 0},
+            ]
+        )
+
+        result = client.open_to_work("acc_123", "AE-recruiter-id")
+
+        self.assertFalse(result["is_open_to_work"])
+        self.assertEqual(result["search_fallback_status"], "exact_complete_negative")
+        self.assertTrue(result["search_fallback_evidence"]["base_complete"])
+        self.assertTrue(result["search_fallback_evidence"]["spotlight_complete"])
+
+    def test_open_to_work_keeps_incomplete_negative_unknown(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(return_value=self._profile_with_missing_signal())
+        client.search_people = Mock(
+            side_effect=[
+                {
+                    "data": [{"id": "AE-recruiter-id"}],
+                    "total_count": 2,
+                    "next_cursor": "base-next",
+                },
+                {"data": [], "total_count": 1, "next_cursor": "spotlight-next"},
+            ]
+        )
+
+        result = client.open_to_work("acc_123", "AE-recruiter-id")
+
+        self.assertIsNone(result["is_open_to_work"])
+        self.assertEqual(result["search_fallback_status"], "incomplete_search")
+
+    def test_open_to_work_keeps_missing_identity_filters_unknown(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(
+            return_value={
+                "id": "AE-recruiter-id",
+                "first_name": None,
+                "last_name": None,
+                "specifics": {"is_open_to_work": None},
+                "work_experience": [],
+            }
+        )
+        client.search_people = Mock()
+
+        result = client.open_to_work("acc_123", "AE-recruiter-id")
+
+        self.assertIsNone(result["is_open_to_work"])
+        self.assertEqual(result["search_fallback_status"], "unavailable_identity_filters")
+        client.search_people.assert_not_called()
+
+    def test_open_to_work_can_build_exact_search_from_display_name(self):
+        profile = self._profile_with_missing_signal()
+        profile.pop("first_name")
+        profile.pop("last_name")
+        profile["display_name"] = "Ada Byron Lovelace"
+        body = RecruiterClient._exact_identity_search_body(profile)
+
+        self.assertEqual(body["first_name"], ["Ada"])
+        self.assertEqual(body["last_name"], ["Lovelace"])
+        self.assertEqual(body["current_company"][0]["id"], "company-1")
+
+    def test_open_to_work_refines_name_search_from_exact_base_result(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(
+            return_value={
+                "id": "AE-recruiter-id",
+                "display_name": "Ada Lovelace",
+                "specifics": {"is_open_to_work": None},
+                "work_experience": [],
+            }
+        )
+        exact_search_result = {
+            "id": "AE-recruiter-id",
+            "display_name": "Ada Lovelace",
+            "work_experience": [
+                {
+                    "role": "Engineer",
+                    "ended_on": None,
+                    "company": {"id": "company-1"},
+                }
+            ],
+        }
+        client.search_people = Mock(
+            side_effect=[
+                {"data": [exact_search_result], "total_count": 10},
+                {"data": [exact_search_result], "total_count": 1},
+                {"data": [], "total_count": 0},
+            ]
+        )
+
+        result = client.open_to_work("acc_123", "AE-recruiter-id")
+
+        self.assertFalse(result["is_open_to_work"])
+        self.assertEqual(result["recruiter_search_calls"], 3)
+        self.assertEqual(result["search_fallback_status"], "exact_complete_negative")
+        self.assertEqual(
+            client.search_people.call_args_list[1].args[1]["current_company"],
+            [{"id": "company-1", "priority": "MUST_HAVE"}],
+        )
 
     def test_recruiter_search_parameters_use_post_body_contract(self):
         session = Mock()

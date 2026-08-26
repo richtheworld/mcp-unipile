@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -49,6 +49,33 @@ def normalize_base_url(value: str) -> str:
     parsed = urlparse(value)
     if not parsed.netloc:
         raise ValueError("UNIPILE_V2_BASE_URL is not a valid host")
+    return value
+
+
+def normalize_profile_identifier(value: str) -> str:
+    """Return a v2 user ID or public LinkedIn slug, never a Recruiter URL."""
+    value = value.strip()
+    if not value:
+        raise ValueError("Profile identifier must not be empty")
+    parsed = urlparse(value)
+    if parsed.scheme or parsed.netloc:
+        host = parsed.netloc.casefold().split(":", 1)[0]
+        parts = [part for part in parsed.path.split("/") if part]
+        if host.endswith("linkedin.com") and len(parts) >= 2 and parts[0].casefold() == "in":
+            slug = unquote(parts[1])
+            if "/" in slug or "?" in slug or "#" in slug:
+                raise ValueError(
+                    "LinkedIn profile slug contains an encoded URL delimiter"
+                )
+            return slug
+        raise ValueError(
+            "Profile endpoints require a provider-issued user ID or LinkedIn /in/ "
+            "slug; a Recruiter URL is a search context, not a profile identifier"
+        )
+    if "/" in value or "?" in value or "#" in value:
+        raise ValueError(
+            "Profile identifier must be a provider-issued user ID or LinkedIn /in/ slug"
+        )
     return value
 
 
@@ -154,6 +181,7 @@ class RecruiterClient:
         self, account_id: str, identifier: str, variant: str = "recruiter"
     ) -> dict[str, Any]:
         account_id = self._account(account_id)
+        identifier = normalize_profile_identifier(identifier)
         variant_name = variant if variant.startswith("linkedin_") else f"linkedin_{variant}"
         return self._request(
             "GET",
@@ -180,16 +208,152 @@ class RecruiterClient:
 
     def open_to_work(self, account_id: str, identifier: str) -> dict[str, Any]:
         profile, calls = self.resolve_recruiter_profile(account_id, identifier)
-        return {
-            "provider_id": profile.get("provider_id") or profile.get("id"),
+        provider_id = profile.get("provider_id") or profile.get("id")
+        signal = get_linkedin_profile_field(profile, "is_open_to_work")
+        result = {
+            "provider_id": provider_id,
             "public_identifier": profile.get("public_identifier"),
             "first_name": profile.get("first_name"),
             "last_name": profile.get("last_name"),
-            "is_open_to_work": get_linkedin_profile_field(
-                profile, "is_open_to_work"
-            ),
+            "is_open_to_work": signal,
+            "is_open_to_work_source": "profile" if signal is not None else None,
             "profile_calls": calls,
+            "recruiter_search_calls": 0,
         }
+        if signal is not None:
+            return result
+
+        search_body = self._exact_identity_search_body(profile)
+        if not provider_id or search_body is None:
+            result["search_fallback_status"] = "unavailable_identity_filters"
+            return result
+
+        base = self.search_people(account_id, search_body, limit=100)
+        search_calls = 1
+        target_id = str(provider_id)
+        exact_base_item = next(
+            (
+                item
+                for item in self._items(base)
+                if str(item.get("id") or item.get("provider_id") or "") == target_id
+            ),
+            None,
+        )
+        refined_body = (
+            self._exact_identity_search_body(exact_base_item)
+            if exact_base_item is not None
+            else None
+        )
+        if refined_body is not None and refined_body != search_body:
+            search_body = refined_body
+            base = self.search_people(account_id, search_body, limit=100)
+            search_calls += 1
+
+        spotlight_body = dict(search_body)
+        spotlight_body["spotlights"] = ["OPEN_TO_WORK"]
+        spotlight = self.search_people(account_id, spotlight_body, limit=100)
+        search_calls += 1
+        result["recruiter_search_calls"] = search_calls
+
+        base_ids = self._search_result_ids(base)
+        spotlight_ids = self._search_result_ids(spotlight)
+        base_complete = self._search_page_complete(base)
+        spotlight_complete = self._search_page_complete(spotlight)
+
+        if target_id in spotlight_ids:
+            result["is_open_to_work"] = True
+            result["is_open_to_work_source"] = "recruiter_search_spotlight"
+            result["search_fallback_status"] = "exact_positive"
+        elif target_id in base_ids and base_complete and spotlight_complete:
+            result["is_open_to_work"] = False
+            result["is_open_to_work_source"] = "recruiter_search_spotlight"
+            result["search_fallback_status"] = "exact_complete_negative"
+        elif target_id not in base_ids:
+            result["search_fallback_status"] = "exact_id_missing_from_base"
+        else:
+            result["search_fallback_status"] = "incomplete_search"
+
+        result["search_fallback_evidence"] = {
+            "base_returned": len(self._items(base)),
+            "base_total_count": base.get("total_count"),
+            "base_complete": base_complete,
+            "base_exact_id_present": target_id in base_ids,
+            "spotlight_returned": len(self._items(spotlight)),
+            "spotlight_total_count": spotlight.get("total_count"),
+            "spotlight_complete": spotlight_complete,
+            "spotlight_exact_id_present": target_id in spotlight_ids,
+        }
+        return result
+
+    @staticmethod
+    def _items(page: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return list(page.get("data") or page.get("items") or [])
+
+    @classmethod
+    def _search_result_ids(cls, page: Mapping[str, Any]) -> set[str]:
+        return {
+            str(item.get("id") or item.get("provider_id"))
+            for item in cls._items(page)
+            if item.get("id") or item.get("provider_id")
+        }
+
+    @classmethod
+    def _search_page_complete(cls, page: Mapping[str, Any]) -> bool:
+        items = cls._items(page)
+        total_count = page.get("total_count")
+        if isinstance(total_count, int):
+            return total_count <= len(items)
+        return not bool(page.get("next_cursor"))
+
+    @staticmethod
+    def _exact_identity_search_body(
+        profile: Mapping[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        first_name = str(profile.get("first_name") or "").strip()
+        last_name = str(profile.get("last_name") or "").strip()
+        if not first_name or not last_name:
+            display_parts = str(profile.get("display_name") or "").split()
+            if len(display_parts) >= 2:
+                first_name = first_name or display_parts[0]
+                last_name = last_name or display_parts[-1]
+        if not first_name or not last_name:
+            return None
+
+        body: dict[str, Any] = {
+            "first_name": [first_name],
+            "last_name": [last_name],
+        }
+        for experience in profile.get("work_experience") or []:
+            if not isinstance(experience, Mapping):
+                continue
+            if experience.get("ended_on") not in {None, ""}:
+                continue
+            company = experience.get("company") or {}
+            company_id = (
+                company.get("id") if isinstance(company, Mapping) else None
+            ) or experience.get("company_id")
+            job_title = (
+                experience.get("role")
+                or experience.get("title")
+                or experience.get("job_title")
+                or experience.get("position")
+            )
+            if not company_id or not job_title:
+                continue
+            body.update({
+                "current_company": [
+                    {"id": str(company_id), "priority": "MUST_HAVE"}
+                ],
+                "job_title": [
+                    {
+                        "name": str(job_title),
+                        "priority": "MUST_HAVE",
+                        "preferences": "CURRENT",
+                    }
+                ],
+            })
+            break
+        return body
 
     def list_projects(
         self,
