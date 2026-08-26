@@ -7,6 +7,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://api.unipile.com"
 
 
+def get_linkedin_profile_field(profile: Dict[str, Any], field: str) -> Any:
+    """Read a LinkedIn-specific profile field from the v2 response shape."""
+    specifics = profile.get("specifics")
+    if isinstance(specifics, dict) and field in specifics:
+        return specifics[field]
+    return profile.get(field)
+
+
 class UnipileClient:
     def __init__(self, api_key: str, base_url: str = DEFAULT_BASE_URL):
         """

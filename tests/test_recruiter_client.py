@@ -156,6 +156,20 @@ class RecruiterClientTests(unittest.TestCase):
             ("acc_123", "ACoA-classic-id", "recruiter"),
         )
 
+    def test_open_to_work_reads_linkedin_specifics(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(
+            return_value={
+                "id": "AE-recruiter-id",
+                "specifics": {"is_open_to_work": True},
+            }
+        )
+
+        result = client.open_to_work("acc_123", "AE-recruiter-id")
+
+        self.assertTrue(result["is_open_to_work"])
+        self.assertEqual(result["profile_calls"], 1)
+
     def test_recruiter_search_parameters_use_post_body_contract(self):
         session = Mock()
         session.request.return_value = FakeResponse(payload={"data": []})

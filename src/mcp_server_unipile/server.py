@@ -14,7 +14,7 @@ from markdownify import markdownify
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from .unipile_client import UnipileClient
+from .unipile_client import UnipileClient, get_linkedin_profile_field
 
 class UnipileWrapper:
     def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None):
@@ -179,11 +179,13 @@ class UnipileWrapper:
                 linkedin_api=linkedin_api,
             )
             classic_signal = (
-                classic_profile.get("is_open_to_work")
+                get_linkedin_profile_field(classic_profile, "is_open_to_work")
                 if classic_profile is not None
                 else None
             )
-            recruiter_signal = profile.get("is_open_to_work")
+            recruiter_signal = get_linkedin_profile_field(
+                profile, "is_open_to_work"
+            )
             result = {
                 "provider": profile.get("provider"),
                 "provider_id": profile.get("provider_id") or profile.get("id"),
@@ -199,7 +201,9 @@ class UnipileWrapper:
                     if classic_profile is not None
                     else None
                 ),
-                "is_open_profile": profile.get("is_open_profile"),
+                "is_open_profile": get_linkedin_profile_field(
+                    profile, "is_open_profile"
+                ),
             }
             return json.dumps(result, default=str)
         except Exception as e:

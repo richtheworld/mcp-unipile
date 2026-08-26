@@ -34,7 +34,10 @@ class V2ClassicIdClient(RecordingProfileClient):
             "id": "AE-recruiter-id",
             "first_name": "Ada",
             "last_name": "Lovelace",
-            "is_open_to_work": True,
+            "specifics": {
+                "is_open_to_work": True,
+                "is_open_profile": False,
+            },
         }
 
 
@@ -60,6 +63,9 @@ class UnipileWrapperTests(unittest.TestCase):
         result = json.loads(wrapper.get_linkedin_open_to_work("acc_123", "ada"))
 
         self.assertEqual(result["provider_id"], "AE-recruiter-id")
+        self.assertTrue(result["is_open_to_work"])
+        self.assertTrue(result["is_recruiter_only_open_to_work"])
+        self.assertFalse(result["is_open_profile"])
         self.assertEqual(
             wrapper.client.calls,
             [
