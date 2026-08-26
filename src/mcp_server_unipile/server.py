@@ -155,8 +155,9 @@ class UnipileWrapper:
     ) -> str:
         """Return the documented LinkedIn Open to Work signal without contact data."""
         try:
-            requested_identifier = identifier
-            identifier = normalize_profile_identifier(identifier)
+            input_reference = identifier
+            requested_identifier = normalize_profile_identifier(identifier)
+            identifier = requested_identifier
             classic_profile = None
 
             # Recruiter profile requests require LinkedIn's internal member ID.
@@ -194,6 +195,7 @@ class UnipileWrapper:
                 "public_identifier": profile.get("public_identifier"),
                 "first_name": profile.get("first_name"),
                 "last_name": profile.get("last_name"),
+                "input_reference": input_reference,
                 "requested_identifier": requested_identifier,
                 "linkedin_api": linkedin_api,
                 "is_open_to_work": recruiter_signal,

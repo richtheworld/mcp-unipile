@@ -86,7 +86,11 @@ class UnipileWrapperTests(unittest.TestCase):
         )
 
         self.assertTrue(result["is_open_to_work"])
-        self.assertEqual(result["requested_identifier"], "https://www.linkedin.com/talent/profile/AE123456789?searchRequestId=1")
+        self.assertEqual(
+            result["input_reference"],
+            "https://www.linkedin.com/talent/profile/AE123456789?searchRequestId=1",
+        )
+        self.assertEqual(result["requested_identifier"], "AE123456789")
         self.assertEqual(
             wrapper.client.calls,
             [("acc_123", "AE123456789", "recruiter")],

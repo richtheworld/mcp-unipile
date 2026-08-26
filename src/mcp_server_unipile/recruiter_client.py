@@ -97,6 +97,43 @@ def normalize_profile_identifier(value: str) -> str:
     return value
 
 
+def profile_identifier_schema(value: str) -> dict[str, Any]:
+    """Describe how one LinkedIn identity input maps into the Unipile v2 API."""
+    input_value = value.strip()
+    normalized_identifier = normalize_profile_identifier(input_value)
+    parsed = urlparse(input_value)
+    parts = [part.casefold() for part in parsed.path.split("/") if part]
+    if parsed.scheme or parsed.netloc:
+        if parts[:1] == ["in"]:
+            input_type = "public_profile_url"
+            resolution_strategy = "recruiter_then_classic_bridge"
+        else:
+            input_type = "recruiter_profile_url"
+            resolution_strategy = "direct_recruiter_profile"
+    elif normalized_identifier.startswith(("AEM", "AE")) or normalized_identifier.isdigit():
+        input_type = "recruiter_candidate_id"
+        resolution_strategy = "direct_recruiter_profile"
+    elif normalized_identifier.startswith(("ACo", "ADo")):
+        input_type = "classic_user_id"
+        resolution_strategy = "recruiter_variant_conversion"
+    else:
+        input_type = "public_slug_or_provider_id"
+        resolution_strategy = "recruiter_then_classic_bridge"
+    return {
+        "schema_version": "linkedin-profile-identity/v1",
+        "input_type": input_type,
+        "input_reference": input_value,
+        "normalized_identifier": normalized_identifier,
+        "resolution_strategy": resolution_strategy,
+        "v2_request": {
+            "method": "GET",
+            "path_template": "/v2/{account_id}/users/{user_id}",
+            "path_params": {"user_id": normalized_identifier},
+            "query": {"variant": "linkedin_recruiter"},
+        },
+    }
+
+
 class RecruiterClient:
     """Small requests-based client for the Recruiter sourcing surface."""
 
@@ -224,6 +261,28 @@ class RecruiterClient:
         if not provider_id:
             raise ValueError("Classic profile did not return a provider identifier")
         return self.get_profile(account_id, str(provider_id), "recruiter"), 2
+
+    def convert_profile_identifier(
+        self, account_id: str, identifier: str
+    ) -> dict[str, Any]:
+        """Resolve any supported LinkedIn identity input to one canonical v2 record."""
+        schema = profile_identifier_schema(identifier)
+        profile, calls = self.resolve_recruiter_profile(
+            account_id, schema["normalized_identifier"]
+        )
+        returned_identifier = profile.get("provider_id") or profile.get("id")
+        if not returned_identifier:
+            raise ValueError("Recruiter profile did not return a provider identifier")
+        canonical_identifier = normalize_profile_identifier(str(returned_identifier))
+        return {
+            **schema,
+            "canonical_identity": {
+                "provider_id": canonical_identifier,
+                "public_identifier": profile.get("public_identifier"),
+                "profile_variant": "linkedin_recruiter",
+                "profile_calls": calls,
+            },
+        }
 
     def open_to_work(self, account_id: str, identifier: str) -> dict[str, Any]:
         requested_identifier = normalize_profile_identifier(identifier)
