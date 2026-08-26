@@ -240,6 +240,29 @@ class RecruiterClientTests(unittest.TestCase):
             ("acc_123", "ACoA-classic-id", "recruiter"),
         )
 
+    def test_recruiter_resolution_bridges_live_invalid_public_slug_response(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(
+            side_effect=[
+                UnipileAPIError(
+                    400,
+                    "api/invalid_parameters",
+                    "Invalid User ID.",
+                ),
+                {"id": "ACoA-classic-id", "public_identifier": "luke-atkins"},
+                {"id": "AE-recruiter-id", "is_open_to_work": False},
+            ]
+        )
+
+        profile, calls = client.resolve_recruiter_profile("acc_123", "luke-atkins")
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(profile["id"], "AE-recruiter-id")
+        self.assertEqual(
+            client.get_profile.call_args_list[1].args,
+            ("acc_123", "luke-atkins", "classic"),
+        )
+
     def test_recruiter_profile_url_resolves_directly_to_embedded_candidate_id(self):
         client = RecruiterClient(api_key="secret")
         client.get_profile = Mock(

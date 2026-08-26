@@ -254,7 +254,12 @@ class RecruiterClient:
         try:
             return self.get_profile(account_id, identifier, "recruiter"), 1
         except UnipileAPIError as error:
-            if error.status_code not in {404, 422}:
+            public_identifier_rejected = (
+                error.status_code == 400
+                and error.error_type == "api/invalid_parameters"
+                and "invalid user id" in error.detail.casefold()
+            )
+            if error.status_code not in {404, 422} and not public_identifier_rejected:
                 raise
         classic = self.get_profile(account_id, identifier, "classic")
         provider_id = classic.get("provider_id") or classic.get("id")
