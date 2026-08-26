@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from .unipile_client import get_linkedin_profile_field
+
 
 READ_METHODS = {"GET", "HEAD", "OPTIONS"}
 DEFAULT_BASE_URL = "https://api.unipile.com"
@@ -183,7 +185,9 @@ class RecruiterClient:
             "public_identifier": profile.get("public_identifier"),
             "first_name": profile.get("first_name"),
             "last_name": profile.get("last_name"),
-            "is_open_to_work": profile.get("is_open_to_work"),
+            "is_open_to_work": get_linkedin_profile_field(
+                profile, "is_open_to_work"
+            ),
             "profile_calls": calls,
         }
 
