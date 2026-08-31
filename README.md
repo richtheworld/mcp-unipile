@@ -160,7 +160,10 @@ Read-only examples:
 unipile-recruiter doctor
 unipile-recruiter projects --keywords Strala
 unipile-recruiter project 2107551666
+unipile-recruiter convert-identifier 'https://www.linkedin.com/talent/profile/AE...' --plan-only
+unipile-recruiter convert-identifier 'https://www.linkedin.com/in/public-slug'
 unipile-recruiter open-to-work linkedin-public-slug
+unipile-recruiter open-to-work 'https://www.linkedin.com/talent/profile/AE...'
 unipile-recruiter search --body search.json --limit 25
 unipile-recruiter search-parameters LOCATION --keywords London
 unipile-recruiter pipeline PROJECT_ID --body '{"spotlights":["OPEN_TO_WORK"]}'
@@ -173,6 +176,15 @@ The CLI never translates or reuses identifiers across versions. V1 requires
 explicit selection with `--backend v1` (or `UNIPILE_RECRUITER_BACKEND=v1`) and
 accepts only `accounts`, `doctor`, `projects`, `project`, `applicants`, and
 read-only `request` commands.
+
+Profile commands accept a provider-issued ID, a public `/in/` URL or slug, or
+a Recruiter candidate profile URL. Recruiter profile links are resolved to the
+candidate ID embedded in the URL and the canonical ID returned by Unipile;
+Recruiter search-results URLs remain inputs to `search-url`, not profile calls.
+`convert-identifier --plan-only` emits the typed input classification and exact
+v2 request shape without credentials or a network call. Without `--plan-only`,
+it resolves the profile and returns the canonical Recruiter `provider_id`,
+public identifier, profile variant, and provider-call count.
 
 Mutation commands are dry-runs by default. A candidate save first validates the
 project and prints the exact confirmation token:

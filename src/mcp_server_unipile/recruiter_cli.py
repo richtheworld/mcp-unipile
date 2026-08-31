@@ -15,6 +15,7 @@ from .recruiter_client import (
     RecruiterClient,
     UnipileAPIError,
     V1RecruiterClient,
+    profile_identifier_schema,
 )
 
 
@@ -23,6 +24,7 @@ CAPABILITIES = {
         "accounts",
         "applicants (v1 job IDs or v2 project IDs)",
         "profiles and Recruiter Open to Work",
+        "LinkedIn identity conversion to canonical v2 profile IDs",
         "projects list/get",
         "Recruiter people search",
         "Recruiter search parameters",
@@ -151,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
     profile = sub.add_parser("profile", help="Retrieve a LinkedIn profile variant")
     profile.add_argument(
         "identifier",
-        help="Provider-issued user ID or LinkedIn /in/ slug; not a Recruiter URL",
+        help="Provider user ID, LinkedIn /in/ profile, or Recruiter profile URL",
     )
     profile.add_argument(
         "--variant", choices=("classic", "recruiter", "sales_navigator"), default="recruiter"
@@ -160,7 +162,21 @@ def build_parser() -> argparse.ArgumentParser:
     otw = sub.add_parser("open-to-work", help="Check Recruiter-visible Open to Work")
     otw.add_argument(
         "identifier",
-        help="Recruiter candidate ID or LinkedIn /in/ slug; not a Recruiter URL",
+        help="Candidate ID, LinkedIn /in/ profile, or Recruiter profile URL",
+    )
+
+    convert = sub.add_parser(
+        "convert-identifier",
+        help="Convert a LinkedIn profile reference to the canonical v2 identity schema",
+    )
+    convert.add_argument(
+        "identifier",
+        help="Provider ID, LinkedIn /in/ profile/slug, or Recruiter profile URL",
+    )
+    convert.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Emit the deterministic v2 request schema without credentials or network calls",
     )
 
     search = sub.add_parser("search", help="Perform structured Recruiter people search")
@@ -279,6 +295,8 @@ def dry_run(operation: str, token: str, request: Mapping[str, Any], **extra: Any
 def execute(args: argparse.Namespace) -> Any:
     if args.command == "capabilities":
         return CAPABILITIES
+    if args.command == "convert-identifier" and args.plan_only:
+        return profile_identifier_schema(args.identifier)
     if args.backend == "v1" and args.command not in V1_COMMANDS:
         raise ValueError(
             f"{args.command} is unavailable on the read-only v1 audit backend; use --backend v2"
@@ -419,6 +437,8 @@ def execute(args: argparse.Namespace) -> Any:
         return client.get_profile(aid, args.identifier, args.variant)
     if args.command == "open-to-work":
         return client.open_to_work(aid, args.identifier)
+    if args.command == "convert-identifier":
+        return client.convert_profile_identifier(aid, args.identifier)
     if args.command == "search":
         return client.search_people(
             aid, load_json(args.body), cursor=args.cursor, limit=args.limit

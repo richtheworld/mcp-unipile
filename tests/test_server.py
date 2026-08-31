@@ -74,6 +74,52 @@ class UnipileWrapperTests(unittest.TestCase):
             ],
         )
 
+    def test_recruiter_profile_url_routes_embedded_id_directly_to_recruiter(self):
+        wrapper = UnipileWrapper.__new__(UnipileWrapper)
+        wrapper.client = RecordingProfileClient()
+
+        result = json.loads(
+            wrapper.get_linkedin_open_to_work(
+                "acc_123",
+                "https://www.linkedin.com/talent/profile/AE123456789?searchRequestId=1",
+            )
+        )
+
+        self.assertTrue(result["is_open_to_work"])
+        self.assertEqual(
+            result["input_reference"],
+            "https://www.linkedin.com/talent/profile/AE123456789?searchRequestId=1",
+        )
+        self.assertEqual(result["requested_identifier"], "AE123456789")
+        self.assertEqual(
+            wrapper.client.calls,
+            [("acc_123", "AE123456789", "recruiter")],
+        )
+
+    def test_numeric_recruiter_identifiers_skip_classic_resolution(self):
+        for reference in (
+            "123456789",
+            "https://www.linkedin.com/recruiter/profile/123456789,HHNH,example",
+            "https://www.linkedin.com/talent/profile/123456789",
+        ):
+            with self.subTest(reference=reference):
+                wrapper = UnipileWrapper.__new__(UnipileWrapper)
+                wrapper.client = RecordingProfileClient()
+
+                result = json.loads(
+                    wrapper.get_linkedin_open_to_work("acc_123", reference)
+                )
+
+                self.assertNotIn("error", result)
+                self.assertTrue(result["is_open_to_work"])
+                self.assertEqual(result["input_reference"], reference)
+                self.assertEqual(result["requested_identifier"], "123456789")
+                self.assertEqual(result["provider_id"], "123456789")
+                self.assertEqual(
+                    wrapper.client.calls,
+                    [("acc_123", "123456789", "recruiter")],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 from .unipile_client import UnipileClient, get_linkedin_profile_field
+from .recruiter_client import normalize_profile_identifier
 
 class UnipileWrapper:
     def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None):
@@ -154,14 +155,16 @@ class UnipileWrapper:
     ) -> str:
         """Return the documented LinkedIn Open to Work signal without contact data."""
         try:
-            requested_identifier = identifier
+            input_reference = identifier
+            requested_identifier = normalize_profile_identifier(identifier)
+            identifier = requested_identifier
             classic_profile = None
 
             # Recruiter profile requests require LinkedIn's internal member ID.
             # Resolve normal public slugs first so callers can pass sheet URLs/slugs.
             recruiter_id_prefixes = ("ACoA", "AEMA", "AEM", "AE")
-            if linkedin_api == "recruiter" and not identifier.startswith(
-                recruiter_id_prefixes
+            if linkedin_api == "recruiter" and not (
+                identifier.startswith(recruiter_id_prefixes) or identifier.isdigit()
             ):
                 classic_profile = self.client.get_linkedin_profile(
                     account_id=account_id,
@@ -192,6 +195,7 @@ class UnipileWrapper:
                 "public_identifier": profile.get("public_identifier"),
                 "first_name": profile.get("first_name"),
                 "last_name": profile.get("last_name"),
+                "input_reference": input_reference,
                 "requested_identifier": requested_identifier,
                 "linkedin_api": linkedin_api,
                 "is_open_to_work": recruiter_signal,
@@ -321,12 +325,12 @@ async def main(base_url: Optional[str] = None, api_key: Optional[str] = None):
             ),
             types.Tool(
                 name="unipile_get_linkedin_open_to_work",
-                description="Retrieve a LinkedIn profile through a connected Recruiter contract and return the documented is_open_to_work signal. The response is deliberately limited to identity and availability fields and excludes contact details.",
+                description="Retrieve a LinkedIn profile through a connected Recruiter contract and return the documented is_open_to_work signal. Accepts a provider ID, public LinkedIn profile URL/slug, or LinkedIn Recruiter profile URL. The response is deliberately limited to identity and availability fields and excludes contact details.",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "account_id": {"type": "string", "description": "Connected Unipile LinkedIn account ID"},
-                        "identifier": {"type": "string", "description": "LinkedIn public identifier or provider-internal profile ID"},
+                        "identifier": {"type": "string", "description": "LinkedIn public profile/slug, Recruiter profile URL, or provider-internal profile ID"},
                         "linkedin_api": {
                             "type": "string",
                             "enum": ["recruiter", "sales_navigator"],
@@ -414,6 +418,7 @@ async def main(base_url: Optional[str] = None, api_key: Optional[str] = None):
 
                 account_id = arguments["account_id"]
                 identifier = arguments["identifier"]
+                resource_identifier = normalize_profile_identifier(identifier)
                 linkedin_api = arguments.get("linkedin_api", "recruiter")
                 results = unipile.get_linkedin_open_to_work(
                     account_id=account_id,
@@ -424,7 +429,7 @@ async def main(base_url: Optional[str] = None, api_key: Optional[str] = None):
                     type="text",
                     text=results,
                     mimeType="application/json",
-                    uri=AnyUrl(f"unipile://linkedin/open-to-work/{identifier}")
+                    uri=AnyUrl(f"unipile://linkedin/open-to-work/{resource_identifier}")
                 )]
             elif name == "unipile_get_emails":
                 if not arguments:

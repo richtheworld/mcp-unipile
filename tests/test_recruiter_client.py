@@ -10,6 +10,7 @@ from mcp_server_unipile.recruiter_client import (
     V1RecruiterClient,
     normalize_base_url,
     normalize_profile_identifier,
+    profile_identifier_schema,
 )
 
 
@@ -38,14 +39,26 @@ class RecruiterClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must start with acc_"):
             client.get_project("legacy_MESSAGING", "project-1")
 
-    def test_profile_identifier_normalizes_public_slug_and_rejects_recruiter_url(self):
+    def test_profile_identifier_normalizes_public_and_recruiter_profile_urls(self):
         self.assertEqual(
             normalize_profile_identifier("https://www.linkedin.com/in/ada-lovelace/?x=1"),
             "ada-lovelace",
         )
-        with self.assertRaisesRegex(ValueError, "Recruiter URL"):
+        self.assertEqual(
             normalize_profile_identifier(
-                "https://www.linkedin.com/talent/profile/AE-recruiter-id"
+                "https://www.linkedin.com/talent/profile/AE-recruiter-id?searchRequestId=1"
+            ),
+            "AE-recruiter-id",
+        )
+        self.assertEqual(
+            normalize_profile_identifier(
+                "https://www.linkedin.com/recruiter/profile/476162262,HHNH,name"
+            ),
+            "476162262",
+        )
+        with self.assertRaisesRegex(ValueError, "search-url command"):
+            normalize_profile_identifier(
+                "https://www.linkedin.com/talent/search?keywords=ada"
             )
         for encoded_delimiter in ("%2F", "%3F", "%23"):
             with self.subTest(encoded_delimiter=encoded_delimiter):
@@ -63,6 +76,50 @@ class RecruiterClientTests(unittest.TestCase):
             client._request.call_args.args[1],
             "/v2/acc_123/users/ada-lovelace",
         )
+
+    def test_profile_identifier_schema_places_inputs_at_the_v2_boundary(self):
+        recruiter = profile_identifier_schema(
+            "https://www.linkedin.com/talent/profile/AE-recruiter-id?searchRequestId=1"
+        )
+        public = profile_identifier_schema("https://www.linkedin.com/in/ada-lovelace/")
+
+        self.assertEqual(recruiter["input_type"], "recruiter_profile_url")
+        self.assertEqual(recruiter["normalized_identifier"], "AE-recruiter-id")
+        self.assertEqual(
+            recruiter["v2_request"],
+            {
+                "method": "GET",
+                "path_template": "/v2/{account_id}/users/{user_id}",
+                "path_params": {"user_id": "AE-recruiter-id"},
+                "query": {"variant": "linkedin_recruiter"},
+            },
+        )
+        self.assertEqual(public["input_type"], "public_profile_url")
+        self.assertEqual(public["normalized_identifier"], "ada-lovelace")
+
+    def test_convert_identifier_resolves_to_canonical_v2_record(self):
+        client = RecruiterClient(api_key="secret")
+        client.resolve_recruiter_profile = Mock(
+            return_value=(
+                {
+                    "id": "https://www.linkedin.com/talent/profile/AE-canonical",
+                    "public_identifier": "ada-lovelace",
+                },
+                1,
+            )
+        )
+
+        result = client.convert_profile_identifier(
+            "acc_123",
+            "https://www.linkedin.com/talent/profile/AE-requested",
+        )
+
+        self.assertEqual(result["normalized_identifier"], "AE-requested")
+        self.assertEqual(result["canonical_identity"]["provider_id"], "AE-canonical")
+        self.assertEqual(
+            result["canonical_identity"]["public_identifier"], "ada-lovelace"
+        )
+        self.assertEqual(result["canonical_identity"]["profile_calls"], 1)
 
     def test_v2_save_candidate_payload(self):
         session = Mock()
@@ -181,6 +238,49 @@ class RecruiterClientTests(unittest.TestCase):
         self.assertEqual(
             client.get_profile.call_args_list[2].args,
             ("acc_123", "ACoA-classic-id", "recruiter"),
+        )
+
+    def test_recruiter_resolution_bridges_live_invalid_public_slug_response(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(
+            side_effect=[
+                UnipileAPIError(
+                    400,
+                    "api/invalid_parameters",
+                    "Invalid User ID.",
+                ),
+                {"id": "ACoA-classic-id", "public_identifier": "luke-atkins"},
+                {"id": "AE-recruiter-id", "is_open_to_work": False},
+            ]
+        )
+
+        profile, calls = client.resolve_recruiter_profile("acc_123", "luke-atkins")
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(profile["id"], "AE-recruiter-id")
+        self.assertEqual(
+            client.get_profile.call_args_list[1].args,
+            ("acc_123", "luke-atkins", "classic"),
+        )
+
+    def test_recruiter_profile_url_resolves_directly_to_embedded_candidate_id(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(
+            return_value={"id": "AE-recruiter-id", "is_open_to_work": True}
+        )
+
+        result = client.open_to_work(
+            "acc_123",
+            "https://www.linkedin.com/talent/profile/AE-recruiter-id?searchRequestId=1",
+        )
+
+        self.assertTrue(result["is_open_to_work"])
+        self.assertEqual(result["requested_identifier"], "AE-recruiter-id")
+        self.assertEqual(result["provider_id"], "AE-recruiter-id")
+        self.assertEqual(result["profile_calls"], 1)
+        self.assertEqual(
+            client.get_profile.call_args.args,
+            ("acc_123", "AE-recruiter-id", "recruiter"),
         )
 
     def test_open_to_work_reads_linkedin_specifics(self):
@@ -423,6 +523,25 @@ class RecruiterClientTests(unittest.TestCase):
         self.assertEqual(
             parser.parse_args(["--backend", "v1", "accounts"]).backend, "v1"
         )
+
+    def test_identifier_plan_is_offline_and_credential_independent(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "convert-identifier",
+                "https://www.linkedin.com/talent/profile/AE-candidate",
+                "--plan-only",
+            ]
+        )
+        original = os.environ.pop("UNIPILE_V2_API_KEY", None)
+        try:
+            result = execute(args)
+        finally:
+            if original is not None:
+                os.environ["UNIPILE_V2_API_KEY"] = original
+
+        self.assertEqual(result["normalized_identifier"], "AE-candidate")
+        self.assertEqual(result["v2_request"]["query"]["variant"], "linkedin_recruiter")
 
     def test_cli_blocks_v1_mutation_before_loading_credentials(self):
         parser = build_parser()
