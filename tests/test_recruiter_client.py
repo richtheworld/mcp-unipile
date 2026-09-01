@@ -1,9 +1,9 @@
 import json
 import os
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from mcp_server_unipile.recruiter_cli import build_parser, execute
+from mcp_server_unipile.recruiter_cli import build_parser, execute, get_client
 from mcp_server_unipile.recruiter_client import (
     RecruiterClient,
     UnipileAPIError,
@@ -164,6 +164,54 @@ class RecruiterClientTests(unittest.TestCase):
         self.assertEqual(caught.exception.request_id, "req-test-123")
         self.assertEqual(caught.exception.as_dict()["request_id"], "req-test-123")
         self.assertNotIn("secret", str(caught.exception))
+
+    def test_v2_client_paces_consecutive_provider_requests(self):
+        session = Mock()
+        session.request.return_value = FakeResponse(payload={"items": []})
+        clock = Mock(side_effect=[100.0, 100.25, 101.35])
+        sleep = Mock()
+        client = RecruiterClient(
+            api_key="secret",
+            session=session,
+            min_request_interval_seconds=1.1,
+            clock=clock,
+            sleep=sleep,
+        )
+
+        client.get_accounts()
+        client.get_accounts()
+
+        sleep.assert_called_once()
+        self.assertAlmostEqual(sleep.call_args.args[0], 0.85)
+        self.assertEqual(session.request.call_count, 2)
+
+    def test_v2_cli_defaults_to_provider_safe_request_pacing(self):
+        args = build_parser().parse_args(["accounts"])
+        self.assertIsNone(args.min_request_interval_seconds)
+        with patch.dict(os.environ, {"UNIPILE_V2_API_KEY": "secret"}, clear=True):
+            client = get_client(args)
+        self.assertEqual(client.min_request_interval_seconds, 1.1)
+
+    def test_v2_interval_environment_is_deferred_and_validated(self):
+        with patch.dict(
+            os.environ,
+            {"UNIPILE_V2_MIN_REQUEST_INTERVAL_SECONDS": "not-a-number"},
+            clear=True,
+        ):
+            capabilities = execute(build_parser().parse_args(["capabilities"]))
+        self.assertEqual(capabilities["api"]["default"], "v2")
+
+        args = build_parser().parse_args(["accounts"])
+        with patch.dict(
+            os.environ,
+            {
+                "UNIPILE_V2_API_KEY": "secret",
+                "UNIPILE_V2_MIN_REQUEST_INTERVAL_SECONDS": "nan",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+                get_client(args)
 
     def test_v2_search_puts_account_in_path(self):
         session = Mock()

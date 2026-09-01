@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from math import isfinite
+from typing import Any, Callable, Mapping, Optional
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -143,11 +145,20 @@ class RecruiterClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 60,
         session: Optional[requests.Session] = None,
+        min_request_interval_seconds: float = 0,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.base_url = normalize_base_url(base_url)
         self.api_key = api_key
         self.timeout = timeout
         self.session = session or requests.Session()
+        if not isfinite(min_request_interval_seconds) or min_request_interval_seconds < 0:
+            raise ValueError("Minimum request interval must be finite and non-negative")
+        self.min_request_interval_seconds = min_request_interval_seconds
+        self._clock = clock
+        self._sleep = sleep
+        self._last_request_completed_at: Optional[float] = None
         host = urlparse(self.base_url).hostname or ""
         if host != "api.unipile.com":
             raise ValueError("Unipile v2 requires base URL https://api.unipile.com")
@@ -162,14 +173,22 @@ class RecruiterClient:
         params: Optional[Mapping[str, Any]] = None,
         body: Optional[Mapping[str, Any]] = None,
     ) -> Any:
-        response = self.session.request(
-            method.upper(),
-            f"{self.base_url}{path}",
-            headers=self.headers,
-            params=dict(params or {}),
-            json=dict(body) if body is not None else None,
-            timeout=self.timeout,
-        )
+        if self._last_request_completed_at is not None:
+            elapsed = self._clock() - self._last_request_completed_at
+            remaining = self.min_request_interval_seconds - elapsed
+            if remaining > 0:
+                self._sleep(remaining)
+        try:
+            response = self.session.request(
+                method.upper(),
+                f"{self.base_url}{path}",
+                headers=self.headers,
+                params=dict(params or {}),
+                json=dict(body) if body is not None else None,
+                timeout=self.timeout,
+            )
+        finally:
+            self._last_request_completed_at = self._clock()
         if not response.ok:
             try:
                 payload = response.json()

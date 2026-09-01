@@ -186,6 +186,12 @@ v2 request shape without credentials or a network call. Without `--plan-only`,
 it resolves the profile and returns the canonical Recruiter `provider_id`,
 public identifier, profile variant, and provider-call count.
 
+V2 CLI calls enforce a 1.1-second minimum interval between consecutive provider
+requests, including account discovery, Classic-to-Recruiter identity bridging,
+and Open-to-Work search fallback. Batch operators can raise the interval with
+`--min-request-interval-seconds` or `UNIPILE_V2_MIN_REQUEST_INTERVAL_SECONDS`;
+the CLI never retries a provider `429` automatically.
+
 Mutation commands are dry-runs by default. A candidate save first validates the
 project and prints the exact confirmation token:
 
