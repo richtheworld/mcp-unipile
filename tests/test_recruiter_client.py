@@ -1,9 +1,9 @@
 import json
 import os
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from mcp_server_unipile.recruiter_cli import build_parser, execute
+from mcp_server_unipile.recruiter_cli import build_parser, execute, get_client
 from mcp_server_unipile.recruiter_client import (
     RecruiterClient,
     UnipileAPIError,
@@ -187,7 +187,31 @@ class RecruiterClientTests(unittest.TestCase):
 
     def test_v2_cli_defaults_to_provider_safe_request_pacing(self):
         args = build_parser().parse_args(["accounts"])
-        self.assertEqual(args.min_request_interval_seconds, 1.1)
+        self.assertIsNone(args.min_request_interval_seconds)
+        with patch.dict(os.environ, {"UNIPILE_V2_API_KEY": "secret"}, clear=True):
+            client = get_client(args)
+        self.assertEqual(client.min_request_interval_seconds, 1.1)
+
+    def test_v2_interval_environment_is_deferred_and_validated(self):
+        with patch.dict(
+            os.environ,
+            {"UNIPILE_V2_MIN_REQUEST_INTERVAL_SECONDS": "not-a-number"},
+            clear=True,
+        ):
+            capabilities = execute(build_parser().parse_args(["capabilities"]))
+        self.assertEqual(capabilities["api"]["default"], "v2")
+
+        args = build_parser().parse_args(["accounts"])
+        with patch.dict(
+            os.environ,
+            {
+                "UNIPILE_V2_API_KEY": "secret",
+                "UNIPILE_V2_MIN_REQUEST_INTERVAL_SECONDS": "nan",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+                get_client(args)
 
     def test_v2_search_puts_account_in_path(self):
         session = Mock()

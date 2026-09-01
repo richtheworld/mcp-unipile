@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import unquote, urlparse
 
@@ -152,8 +153,8 @@ class RecruiterClient:
         self.api_key = api_key
         self.timeout = timeout
         self.session = session or requests.Session()
-        if min_request_interval_seconds < 0:
-            raise ValueError("Minimum request interval must not be negative")
+        if not isfinite(min_request_interval_seconds) or min_request_interval_seconds < 0:
+            raise ValueError("Minimum request interval must be finite and non-negative")
         self.min_request_interval_seconds = min_request_interval_seconds
         self._clock = clock
         self._sleep = sleep

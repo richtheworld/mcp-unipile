@@ -102,7 +102,7 @@ def add_connection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--min-request-interval-seconds",
         type=float,
-        default=float(os.getenv("UNIPILE_V2_MIN_REQUEST_INTERVAL_SECONDS", "1.1")),
+        default=None,
         help=(
             "Minimum delay after each v2 provider request; defaults to 1.1 seconds "
             "and can be raised for batch safety policies"
@@ -270,10 +270,21 @@ def get_client(args: argparse.Namespace) -> RecruiterClient | V1RecruiterClient:
     api_key = os.getenv("UNIPILE_V2_API_KEY")
     if not api_key:
         raise ValueError("Set UNIPILE_V2_API_KEY for v2 operations")
+    interval_value = args.min_request_interval_seconds
+    if interval_value is None:
+        configured_interval = os.getenv(
+            "UNIPILE_V2_MIN_REQUEST_INTERVAL_SECONDS", "1.1"
+        )
+        try:
+            interval_value = float(configured_interval)
+        except ValueError as error:
+            raise ValueError(
+                "UNIPILE_V2_MIN_REQUEST_INTERVAL_SECONDS must be a finite number"
+            ) from error
     return RecruiterClient(
         api_key=api_key,
         base_url=args.base_url or os.getenv("UNIPILE_V2_BASE_URL", DEFAULT_BASE_URL),
-        min_request_interval_seconds=args.min_request_interval_seconds,
+        min_request_interval_seconds=interval_value,
     )
 
 
