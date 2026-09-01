@@ -165,6 +165,30 @@ class RecruiterClientTests(unittest.TestCase):
         self.assertEqual(caught.exception.as_dict()["request_id"], "req-test-123")
         self.assertNotIn("secret", str(caught.exception))
 
+    def test_v2_client_paces_consecutive_provider_requests(self):
+        session = Mock()
+        session.request.return_value = FakeResponse(payload={"items": []})
+        clock = Mock(side_effect=[100.0, 100.25, 101.35])
+        sleep = Mock()
+        client = RecruiterClient(
+            api_key="secret",
+            session=session,
+            min_request_interval_seconds=1.1,
+            clock=clock,
+            sleep=sleep,
+        )
+
+        client.get_accounts()
+        client.get_accounts()
+
+        sleep.assert_called_once()
+        self.assertAlmostEqual(sleep.call_args.args[0], 0.85)
+        self.assertEqual(session.request.call_count, 2)
+
+    def test_v2_cli_defaults_to_provider_safe_request_pacing(self):
+        args = build_parser().parse_args(["accounts"])
+        self.assertEqual(args.min_request_interval_seconds, 1.1)
+
     def test_v2_search_puts_account_in_path(self):
         session = Mock()
         session.request.return_value = FakeResponse(payload={"items": []})

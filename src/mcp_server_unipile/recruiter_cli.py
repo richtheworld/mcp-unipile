@@ -99,6 +99,15 @@ def add_connection_args(parser: argparse.ArgumentParser) -> None:
         "--account-id",
         help="Version-specific LinkedIn account ID; auto-discovers when unambiguous",
     )
+    parser.add_argument(
+        "--min-request-interval-seconds",
+        type=float,
+        default=float(os.getenv("UNIPILE_V2_MIN_REQUEST_INTERVAL_SECONDS", "1.1")),
+        help=(
+            "Minimum delay after each v2 provider request; defaults to 1.1 seconds "
+            "and can be raised for batch safety policies"
+        ),
+    )
     parser.add_argument("--compact", action="store_true", help="Emit compact JSON")
 
 
@@ -264,6 +273,7 @@ def get_client(args: argparse.Namespace) -> RecruiterClient | V1RecruiterClient:
     return RecruiterClient(
         api_key=api_key,
         base_url=args.base_url or os.getenv("UNIPILE_V2_BASE_URL", DEFAULT_BASE_URL),
+        min_request_interval_seconds=args.min_request_interval_seconds,
     )
 
 
