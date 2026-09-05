@@ -106,6 +106,21 @@ class OutreachTests(unittest.TestCase):
         self.assertFalse(result['chats'][0]['messages']['data'][0]['is_sender'])
         self.assertEqual(result['chats'][0]['messages']['next_cursor'], 'message-next')
 
+    def test_recent_messages_preserves_other_providers_and_classic_only_accounts(self):
+        wrapper = UnipileWrapper.__new__(UnipileWrapper)
+        wrapper.recruiter = self.client
+        for account, expected in [
+            ({'provider': 'whatsapp'}, '/v2/acc_123/chats'),
+            ({'provider': 'linkedin', 'metadata': {'products_connection_status': {'classic': 'running'}}}, '/v2/acc_123/inboxes/CLASSIC_PRIMARY/chats'),
+            ({'provider': 'linkedin', 'metadata': {'products_connection_status': {'recruiter': 'running'}}}, '/v2/acc_123/inboxes/RECRUITER_PRIMARY/chats'),
+        ]:
+            self.client.direct_request.reset_mock()
+            self.client.direct_request.side_effect = [account, {'data': []}]
+            wrapper.recent_messages('acc_123', None, 1)
+            call = self.client.direct_request.call_args
+            path = call.kwargs.get('path') or call.args[1]
+            self.assertEqual(path, expected)
+
     def test_mcp_rejects_connection_override_and_bad_parser_inputs(self):
         wrapper = UnipileWrapper.__new__(UnipileWrapper)
         wrapper.recruiter = self.client

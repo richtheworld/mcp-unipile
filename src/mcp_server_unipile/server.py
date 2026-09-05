@@ -65,9 +65,23 @@ class UnipileWrapper:
                 raise ValueError("MCP JSON inputs must be inline objects, not stdin or local files")
         return execute(args, client_override=self.recruiter)
 
-    def recent_messages(self, account_id: str, inbox_id: str, limit: int) -> dict[str, Any]:
-        page = outreach.run(self.recruiter, "chats", account_id,
-                            {"inbox_id": inbox_id, "limit": limit})
+    def recent_messages(self, account_id: str, inbox_id: Optional[str], limit: int) -> dict[str, Any]:
+        generic = False
+        if inbox_id is None:
+            aid = outreach.segment(account_id, "account_id")
+            self.recruiter._account(aid)
+            account = self.recruiter.direct_request("GET", f"/v2/accounts/{aid}")
+            provider = str(account.get("provider") or account.get("type") or "").lower()
+            if provider == "linkedin":
+                products = account.get("metadata", {}).get("products_connection_status", {})
+                inbox_id = "RECRUITER_PRIMARY" if products.get("recruiter") == "running" else "CLASSIC_PRIMARY"
+            else:
+                generic = True
+        if generic:
+            page = self.recruiter.direct_request("GET", f"/v2/{account_id}/chats", params={"limit": limit})
+        else:
+            page = outreach.run(self.recruiter, "chats", account_id,
+                                {"inbox_id": inbox_id, "limit": limit})
         items = page.get("data") or page.get("items") or []
         chats = []
         for chat in items[:limit]:
@@ -371,7 +385,7 @@ async def main(base_url: Optional[str] = None, api_key: Optional[str] = None):
                     "properties": {
                         "account_id": {"type": "string", "description": "Connected Unipile v2 account ID (acc_...)."},
                         "batch_size": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Bounded maximum chats and messages per chat (default: 10)"},
-                        "inbox_id": {"type": "string", "default": "RECRUITER_PRIMARY", "description": "CLASSIC_PRIMARY or RECRUITER_PRIMARY"}
+                        "inbox_id": {"type": "string", "description": "Optional LinkedIn inbox; auto-selects a running product when omitted"}
                     },
                     "required": ["account_id"]
                 },
@@ -434,7 +448,7 @@ async def main(base_url: Optional[str] = None, api_key: Optional[str] = None):
                 
                 if not isinstance(batch_size, int) or isinstance(batch_size, bool) or not 1 <= batch_size <= 20:
                     raise ValueError("batch_size must be between 1 and 20")
-                results = unipile.recent_messages(account_id, arguments.get("inbox_id", "RECRUITER_PRIMARY"), batch_size)
+                results = unipile.recent_messages(account_id, arguments.get("inbox_id"), batch_size)
                 return [types.TextContent(type="text", text=json.dumps(results),
                                           mimeType="application/json", uri=AnyUrl(f"unipile://messages/{account_id}"))]
             elif name == "unipile_get_linkedin_open_to_work":

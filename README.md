@@ -363,8 +363,9 @@ JSON for `--body` in MCP; stdin (`-`) and local file inputs are disallowed.
 Raw `request`/`proxy` and project/pipeline mutations (`project-create`, `project-edit`,
 `save`) remain CLI-only; MCP allowlists the named outreach commands and sourcing reads.
 
-The existing `unipile_get_recent_messages` tool now accepts `inbox_id` (default
-`RECRUITER_PRIMARY`). Its result is a bounded envelope with per-chat message pages
+The existing `unipile_get_recent_messages` tool now accepts `inbox_id`. When omitted, it selects Recruiter if running,
+otherwise Classic for LinkedIn, and preserves the generic chat route for other
+messaging providers. Its result is a bounded envelope with per-chat message pages
 and cursors, preserving sender metadata for response tracking. `batch_size` limits
 both chat count and messages per chat to at most 20. This envelope replaces the old
 flat, unbounded message list. Use `unipile_recruiter` for explicit page traversal.
