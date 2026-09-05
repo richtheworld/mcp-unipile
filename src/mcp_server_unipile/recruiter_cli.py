@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -52,6 +53,9 @@ CAPABILITIES = {
         "v1 and v2 IDs are never translated or reused implicitly",
     ],
 }
+
+
+from . import outreach
 
 
 V1_COMMANDS = {"accounts", "doctor", "projects", "project", "applicants", "request"}
@@ -108,6 +112,7 @@ def add_connection_args(parser: argparse.ArgumentParser) -> None:
             "and can be raised for batch safety policies"
         ),
     )
+    parser.add_argument("--keychain", action="store_true", help="Use the MCP macOS Keychain credential (unipile-v2-api-key)")
     parser.add_argument("--compact", action="store_true", help="Emit compact JSON")
 
 
@@ -125,7 +130,34 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("capabilities", help="Show supported CLI capabilities")
-    sub.add_parser("doctor", help="Validate credentials, account, and project access")
+    doctor_parser = sub.add_parser("doctor", help="Validate credentials, account, and project access")
+    doctor_parser.add_argument("--outreach", action="store_true", help="Read-only checks of Classic, Recruiter, invitations and webhook administration")
+    sub.add_parser("endpoint-map", help="List outreach endpoints, key requirements and verification limits")
+    for name in outreach.ENDPOINTS:
+        item = sub.add_parser(name, help=f"V2 {name}; writes preview by default")
+        if name in ("chats", "chat-start"):
+            item.add_argument("--inbox-id", default="RECRUITER_PRIMARY")
+        if name in ("messages", "message-send"):
+            item.add_argument("chat_id")
+        if name in ("webhook-update", "webhook-delete"):
+            item.add_argument("endpoint_id")
+        if outreach.ENDPOINTS[name][0] == "GET":
+            item.add_argument("--limit", type=int, default=20)
+            item.add_argument("--cursor")
+            item.add_argument("--offset", type=int)
+        else:
+            add_mutation_args(item)
+        if name == "invitations":
+            item.add_argument("--type", choices=("sent", "received"), default="sent")
+        if name in ("invite", "chat-start"):
+            item.add_argument("user_id")
+        if name in ("invite", "chat-start", "message-send"):
+            item.add_argument("--text", required=name != "invite", help="Message text; quote it as one argument")
+        if name == "chat-start":
+            item.add_argument("--subject")
+            item.add_argument("--signature")
+        if name in ("webhook-create", "webhook-update"):
+            item.add_argument("--body", required=True, help="JSON object, file, or -")
     sub.add_parser("accounts", help="List connected accounts")
 
     projects = sub.add_parser("projects", help="List Recruiter projects")
@@ -267,7 +299,13 @@ def get_client(args: argparse.Namespace) -> RecruiterClient | V1RecruiterClient:
                 "Set UNIPILE_V1_API_KEY and UNIPILE_V1_BASE_URL for explicit v1 reads"
             )
         return V1RecruiterClient(api_key=api_key, base_url=base_url)
-    api_key = os.getenv("UNIPILE_V2_API_KEY")
+    api_key = os.getenv("UNIPILE_V2_SERVICE_API_KEY") or os.getenv("UNIPILE_V2_API_KEY")
+    if getattr(args, "keychain", False):
+        result = subprocess.run(
+            ["/usr/bin/security", "find-generic-password", "-a", "codex", "-s", "unipile-v2-api-key", "-w"],
+            capture_output=True, text=True, timeout=10,
+        )
+        api_key = result.stdout.strip() if result.returncode == 0 else None
     if not api_key:
         raise ValueError("Set UNIPILE_V2_API_KEY for v2 operations")
     interval_value = args.min_request_interval_seconds
@@ -313,9 +351,11 @@ def dry_run(operation: str, token: str, request: Mapping[str, Any], **extra: Any
     }
 
 
-def execute(args: argparse.Namespace) -> Any:
+def execute(args: argparse.Namespace, client_override: Optional[RecruiterClient] = None) -> Any:
     if args.command == "capabilities":
-        return CAPABILITIES
+        return {**CAPABILITIES, "outreach": outreach.endpoint_map()}
+    if args.command == "endpoint-map":
+        return outreach.endpoint_map()
     if args.command == "convert-identifier" and args.plan_only:
         return profile_identifier_schema(args.identifier)
     if args.backend == "v1" and args.command not in V1_COMMANDS:
@@ -324,11 +364,24 @@ def execute(args: argparse.Namespace) -> Any:
         )
     if args.backend == "v1" and args.command == "request" and args.method not in READ_METHODS:
         raise ValueError("Unipile v1 is read-only; mutation requests are disabled")
-    client = get_client(args)
+    client = client_override or get_client(args)
+    if client_override is not None and args.backend != "v2":
+        raise ValueError("MCP uses V2 only")
+    if args.command in outreach.ENDPOINTS:
+        options = vars(args).copy()
+        if options.get("body"):
+            options["body"] = load_json(options["body"])
+        aid = None if args.command.startswith("webhook") else account_id(client, args)
+        assert isinstance(client, RecruiterClient)
+        return outreach.run(client, args.command, aid, options)
     if args.command == "accounts":
         return {"api_version": client.api_version, "items": client.get_accounts()}
     aid = account_id(client, args)
 
+    if args.command == "doctor" and getattr(args, "outreach", False):
+        if not isinstance(client, RecruiterClient):
+            raise ValueError("Outreach doctor requires V2")
+        return outreach.doctor(client, aid)
     if args.command == "doctor":
         accounts = client.get_accounts()
         account = next((item for item in accounts if item.get("id") == aid), {})
@@ -553,7 +606,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         result = execute(args)
         print_json(result, pretty=not args.compact)
-        return 0
+        return 2 if args.command == "doctor" and not result.get("ok") else 0
     except UnipileAPIError as error:
         print_json({"error": error.as_dict()}, pretty=not args.compact)
         return 2

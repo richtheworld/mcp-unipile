@@ -17,7 +17,7 @@ def main() -> None:
     logger.info("Starting mcp-server-unipile")
     
     base_url = os.getenv("UNIPILE_V2_BASE_URL", "https://api.unipile.com")
-    api_key = os.getenv("UNIPILE_V2_API_KEY")
+    api_key = os.getenv("UNIPILE_V2_SERVICE_API_KEY") or os.getenv("UNIPILE_V2_API_KEY")
 
     if not api_key:
         logger.error("UNIPILE_V2_API_KEY environment variable is required")

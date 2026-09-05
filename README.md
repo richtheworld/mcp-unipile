@@ -228,3 +228,172 @@ around that warning.
 ## License
 
 This project is licensed under the MIT License. 
+
+## V2 outreach: one implementation for CLI and MCP
+
+The CLI and the `unipile_recruiter` MCP tool share the request builder in
+`outreach.py` and the paced V2 transport. LinkedIn chat lists always use an inbox;
+`/{account_id}/chats` is not the LinkedIn listing endpoint.
+
+### Install and authenticate
+
+Python 3.11+ is required. From this checkout, install or update both entry points:
+
+```sh
+uv tool install --force --reinstall .
+unipile-recruiter capabilities
+unipile-recruiter endpoint-map
+```
+
+Set **`UNIPILE_V2_SERVICE_API_KEY`** in your secret manager for all V2 operations.
+`UNIPILE_V2_API_KEY` remains a compatibility fallback. Keys must belong to the
+same Unipile Application as the accounts. No key is accepted on the command line.
+Service keys can administer webhooks; Account keys cannot. The supported account
+and inbox reads can still work with an Account key, so a successful account read
+alone does not prove webhook permissions.
+
+On Richard's macOS host, the existing MCP credential is in Keychain under service
+`unipile-v2-api-key`, account `codex`. Select that same key explicitly:
+
+```sh
+unipile-recruiter --keychain doctor --outreach
+```
+
+`--keychain` overrides environment credentials for this invocation. It does not
+copy or print the secret. Elsewhere, inject the service key as an environment
+variable. MCP server startup accepts the same environment variables. The existing
+macOS launcher continues to work with its Keychain credential.
+
+### Read and track
+
+Put global options before the command. `--account-id acc_...` is optional when
+exactly one healthy LinkedIn account can be discovered. Examples below assume
+the service key is injected; add `--keychain` before the command on the local host.
+
+```sh
+unipile-recruiter doctor --outreach
+unipile-recruiter inboxes
+unipile-recruiter chats --inbox-id CLASSIC_PRIMARY --limit 20
+unipile-recruiter chats --inbox-id RECRUITER_PRIMARY --limit 20
+unipile-recruiter messages CHAT_ID --limit 20
+unipile-recruiter connections --limit 20
+unipile-recruiter invitations --type sent --limit 20 --offset 0
+unipile-recruiter webhooks
+```
+
+These commands return a **single bounded page**, including the provider's
+`next_cursor`. Pass it back with `--cursor`; invitation lists use `--offset`
+instead. A page is not a complete inbox or connection history. Maximum requested
+page size is 100. A disappeared invitation does not prove acceptance: reconcile
+with connections. Connection acceptance does not mean recruiting interest.
+
+`doctor --outreach` probes account status, credits, inboxes, Classic and Recruiter
+chat lists, invitations, connections and webhook administration. It does not
+send anything or verify callback delivery. An unhealthy result exits with code 2.
+It stops on 401, 403 or 429; no automatic credential fallback or write retry occurs.
+Transport timeouts also return structured errors. A write timeout is an uncertain
+outcome: inspect the destination before deciding whether to retry.
+
+### Preview invitations and messages
+
+```sh
+unipile-recruiter invite ACo_CLASSIC_ID --text 'Connection note'
+unipile-recruiter chat-start AE_RECRUITER_ID \
+  --inbox-id RECRUITER_PRIMARY --subject 'Role conversation' \
+  --signature 'Richard' --text 'Reviewed message text'
+unipile-recruiter chat-start ACo_CLASSIC_ID \
+  --inbox-id CLASSIC_PRIMARY --text 'Reviewed message text'
+unipile-recruiter message-send CHAT_ID --text 'Reviewed reply'
+```
+
+Each write returns its method, path, body and `execute_with` values. To send,
+repeat the exact command with `--execute --confirm 'TOKEN_FROM_PREVIEW'`.
+The new outreach tokens are bound to the account, destination and content;
+changing any of those requires a new preview. These confirmations do not grant
+consent or implement campaign suppression. The caller must check prior outreach,
+replies and do-not-contact status before sending. This CLI is not a bulk scheduler.
+
+Recruiter starts use `specifics.linkedin.recruiter.subject` and `.signature`,
+and `users_ids` is one **string** for an individual conversation. These fields
+come from the current endpoint schema, which supersedes older guide examples
+using `options` and a single-element array. Use the existing chat ID for replies.
+Invitations require a Classic `ACo...` identity; do not substitute a Recruiter ID.
+
+### Webhook administration
+
+```sh
+unipile-recruiter webhook-create --body webhook.json
+unipile-recruiter webhook-update we_ENDPOINT_ID --body '{"description":"Updated description"}'
+unipile-recruiter webhook-delete we_ENDPOINT_ID
+```
+
+Example `webhook.json` (replace the destination and account before execution):
+
+```json
+{
+  "url": "https://your-service.example/unipile/events",
+  "account_ids": ["acc_YOUR_ACCOUNT"],
+  "trigger_events": ["message.new", "relation.new"]
+}
+```
+
+Create, update and delete all require preview confirmation. The API validates event
+names. Omitting `account_ids` subscribes at application scope, so prefer the target
+account explicitly. Signing secrets are redacted from CLI/MCP responses; retrieve
+the endpoint secret securely through the Unipile Dashboard. Validate incoming
+`unipile-signature` using that endpoint secret and the raw body, not the API key.
+This package manages registrations; it does not host the webhook receiver.
+
+### MCP use
+
+The MCP exposes `unipile_recruiter` with an `args` array, passed to the same CLI
+parser **without a shell**:
+
+```json
+{"args":["capabilities"]}
+{"args":["doctor","--outreach"]}
+{"args":["chats","--inbox-id","RECRUITER_PRIMARY","--limit","10"]}
+{"args":["--account-id","acc_YOUR_ACCOUNT","invite","ACo_CLASSIC_ID","--text","Reviewed note"]}
+```
+
+After reviewing the preview, repeat the arguments with `--execute` and `--confirm`
+if the send is authorized. Connection settings and pacing are fixed at MCP startup;
+MCP cannot switch to V1 or replace the credential through a tool call. Use inline
+JSON for `--body` in MCP; stdin (`-`) and local file inputs are disallowed.
+Raw `request` and `proxy` commands remain CLI-only; MCP uses the named operations.
+
+The existing `unipile_get_recent_messages` tool now accepts `inbox_id` (default
+`RECRUITER_PRIMARY`). Its result is a bounded envelope with per-chat message pages
+and cursors, preserving sender metadata for response tracking. `batch_size` limits
+both chat count and messages per chat to at most 20. This envelope replaces the old
+flat, unbounded message list. Use `unipile_recruiter` for explicit page traversal.
+
+### Endpoint map and verification
+
+| Command | Method and V2 path | Minimum key |
+| --- | --- | --- |
+| inboxes | GET `/{account_id}/inboxes` | Account |
+| chats | GET `/{account_id}/inboxes/{inbox_id}/chats` | Account |
+| messages | GET `/{account_id}/chats/{chat_id}/messages` | Account |
+| connections | GET `/{account_id}/users/me/relations` | Account |
+| invitations / invite | GET / POST `/{account_id}/users/me/relation-requests` | Account |
+| chat-start | POST `/{account_id}/inboxes/{inbox_id}/chats/send` | Account |
+| message-send | POST `/{account_id}/chats/{chat_id}/messages/send` | Account |
+| webhooks / webhook-create | GET / POST `/webhooks/endpoints/` | Service |
+| webhook-update / webhook-delete | PATCH / DELETE `/webhooks/endpoints/{endpoint_id}` | Service |
+
+Service keys cover both columns. `endpoint-map` emits the same mapping as JSON.
+Read routes were smoke-tested on 5 September 2026. Write payloads, previews and
+confirmation guards are tested locally; **no candidate-facing send or webhook
+mutation was performed during development**. A controlled send/reply/delivery
+exercise is still required before launching a campaign. Credits are a current
+balance, not permission to send at that rate.
+
+References: [V2 keys](https://developer.unipile.com/v2.0/docs/api-keys),
+[chat starts](https://developer.unipile.com/v2.0/reference/startchatfrominbox),
+[invitations](https://developer.unipile.com/v2.0/docs/linkedin-manage-invitations),
+[webhook verification](https://developer.unipile.com/v2.0/docs/configure-a-webhook).
+
+Run `python -m unittest discover -s tests` for the offline contract and regression
+suite. Use `doctor --outreach` for bounded live reads; its results contain no
+message bodies or signing secrets.

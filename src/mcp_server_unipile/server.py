@@ -8,6 +8,8 @@ from mcp.server import NotificationOptions, Server
 import mcp.server.stdio
 from pydantic import AnyUrl
 import re
+import contextlib
+import io
 from markdownify import markdownify
 
 # Configure logging
@@ -15,20 +17,60 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 from .unipile_client import UnipileClient, get_linkedin_profile_field
-from .recruiter_client import normalize_profile_identifier
+from .recruiter_client import normalize_profile_identifier, RecruiterClient, UnipileAPIError
+from . import outreach
+from .recruiter_cli import build_parser, execute
 
 class UnipileWrapper:
     def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None):
         base_url = base_url or os.getenv(
             "UNIPILE_V2_BASE_URL", "https://api.unipile.com"
         )
-        api_key = api_key or os.getenv("UNIPILE_V2_API_KEY")
+        api_key = api_key or os.getenv("UNIPILE_V2_SERVICE_API_KEY") or os.getenv("UNIPILE_V2_API_KEY")
 
         logger.debug(f"Using API key: {'[MASKED]' if api_key else 'None'}")
         if not api_key:
             raise ValueError("UNIPILE_V2_API_KEY environment variable is required")
 
         self.client = UnipileClient(api_key=api_key, base_url=base_url)
+        self.recruiter = RecruiterClient(api_key=api_key, base_url=base_url,
+            min_request_interval_seconds=max(1.1, float(os.getenv("UNIPILE_V2_MIN_REQUEST_INTERVAL_SECONDS", "1.1"))))
+
+    def recruiter_command(self, argv: list[str]) -> Any:
+        """Execute CLI arguments in process, using one persistent paced V2 client."""
+        if not isinstance(argv, list) or any(not isinstance(a, str) for a in argv):
+            raise ValueError("args must be an array of CLI argument strings")
+        if any(a == "-" for a in argv):
+            raise ValueError("MCP cannot read CLI JSON from stdin; pass an inline JSON object")
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                args = build_parser().parse_args(["--backend", "v2", *argv])
+        except SystemExit as error:
+            if error.code == 0:
+                return {"help": output.getvalue()}
+            raise ValueError(output.getvalue().strip()) from None
+        if args.backend != "v2" or args.keychain or args.base_url is not None or args.min_request_interval_seconds is not None:
+            raise ValueError("MCP connection and pacing settings are fixed at startup; V2 only")
+        if args.command in ("request", "proxy"):
+            raise ValueError("Raw request/proxy commands are CLI-only; use the named MCP commands")
+        for field in ("body", "params"):
+            value = getattr(args, field, None)
+            if value is not None and not value.lstrip().startswith("{"):
+                raise ValueError("MCP JSON inputs must be inline objects, not stdin or local files")
+        return execute(args, client_override=self.recruiter)
+
+    def recent_messages(self, account_id: str, inbox_id: str, limit: int) -> dict[str, Any]:
+        page = outreach.run(self.recruiter, "chats", account_id,
+                            {"inbox_id": inbox_id, "limit": limit})
+        items = page.get("data") or page.get("items") or []
+        chats = []
+        for chat in items[:limit]:
+            messages = outreach.run(self.recruiter, "messages", account_id,
+                                   {"chat_id": chat["id"], "limit": limit})
+            chats.append({"chat_id": chat["id"], "messages": messages})
+        return {"inbox_id": inbox_id, "chats": chats, "next_cursor": page.get("next_cursor"),
+                "bounded_sample": True}
 
     def _extract_person_info(self, original_data: dict) -> dict:
         """Extract core person information from message data"""
@@ -304,6 +346,11 @@ async def main(base_url: Optional[str] = None, api_key: Optional[str] = None):
         """List available tools"""
         return [
             types.Tool(
+                name="unipile_recruiter",
+                description="Use the shared V2 CLI in process. Start with args=[\"capabilities\"] or [\"endpoint-map\"]. Commands include doctor --outreach, inboxes, chats, messages, connections, invitations, invite, chat-start, message-send, webhooks and webhook-create/update/delete; also sourcing commands search, profile, projects, pipeline and open-to-work. Writes return exact previews unless --execute and the matching --confirm are supplied. No shell invocation. Connection settings fixed at startup.",
+                inputSchema={"type": "object", "properties": {"args": {"type": "array", "items": {"type": "string"}}}, "required": ["args"]},
+            ),
+            types.Tool(
                 name="unipile_get_accounts",
                 description="Get all connected messaging accounts from supported platforms: Mobile, Mail, WhatsApp, LinkedIn, Slack, Twitter, Telegram, Instagram, Messenger. Returns account details including connection parameters, ID, name, creation date, signatures, groups, and sources.",
                 inputSchema={
@@ -318,7 +365,8 @@ async def main(base_url: Optional[str] = None, api_key: Optional[str] = None):
                     "type": "object",
                     "properties": {
                         "account_id": {"type": "string", "description": "Connected Unipile v2 account ID (acc_...)."},
-                        "batch_size": {"type": "integer", "description": "Number of messages to fetch per chat (default: 20)"}
+                        "batch_size": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Bounded maximum chats and messages per chat (default: 10)"},
+                        "inbox_id": {"type": "string", "default": "RECRUITER_PRIMARY", "description": "CLASSIC_PRIMARY or RECRUITER_PRIMARY"}
                     },
                     "required": ["account_id"]
                 },
@@ -361,9 +409,11 @@ async def main(base_url: Optional[str] = None, api_key: Optional[str] = None):
     ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
         """Handle tool execution requests"""
         try:
+            if name == "unipile_recruiter":
+                result = unipile.recruiter_command((arguments or {}).get("args", []))
+                return [types.TextContent(type="text", text=json.dumps(result, default=str))]
             if name == "unipile_get_accounts":
                 results = unipile.get_accounts()
-                logger.info(f"MCP response for tool {name}: {results}")
                 return [types.TextContent(
                     type="text",
                     text=results,
@@ -377,41 +427,10 @@ async def main(base_url: Optional[str] = None, api_key: Optional[str] = None):
                 account_id = arguments["account_id"]
                 batch_size = arguments.get("batch_size", 10)
                 
-                # Get all chats first
-                chats = json.loads(unipile.get_chats(account_id=account_id, limit=batch_size))
-                if isinstance(chats, dict) and "error" in chats:
-                    return [types.TextContent(
-                        type="text",
-                        text=json.dumps(chats),
-                        mimeType="application/json",
-                        uri=AnyUrl(f"unipile://error")
-                    )]
-                    
-                all_messages = []
-                for chat in chats:
-                    chat_id = chat.get('id')
-                    if chat_id:
-                        messages = json.loads(
-                            unipile.get_chat_messages(
-                                account_id, chat_id, batch_size
-                            )
-                        )
-                        if isinstance(messages, list):
-                            for message in messages:
-                                message['chat_info'] = {
-                                    'id': chat.get('id'),
-                                    'name': chat.get('name'),
-                                    'account_type': chat.get('account_type'),
-                                    'account_id': chat.get('account_id')
-                                }
-                            all_messages.extend(messages)
-                
-                return [types.TextContent(
-                    type="text",
-                    text=json.dumps(all_messages, default=str),
-                    mimeType="application/json",
-                    uri=AnyUrl(f"unipile://messages/{account_id}")
-                )]
+                if not isinstance(batch_size, int) or isinstance(batch_size, bool) or not 1 <= batch_size <= 20:
+                    raise ValueError("batch_size must be between 1 and 20")
+                results = unipile.recent_messages(account_id, arguments.get("inbox_id", "RECRUITER_PRIMARY"), batch_size)
+                return [types.TextContent(type="text", text=json.dumps(results))]
             elif name == "unipile_get_linkedin_open_to_work":
                 if not arguments:
                     raise ValueError("Missing arguments for unipile_get_linkedin_open_to_work")
@@ -420,11 +439,13 @@ async def main(base_url: Optional[str] = None, api_key: Optional[str] = None):
                 identifier = arguments["identifier"]
                 resource_identifier = normalize_profile_identifier(identifier)
                 linkedin_api = arguments.get("linkedin_api", "recruiter")
-                results = unipile.get_linkedin_open_to_work(
-                    account_id=account_id,
-                    identifier=identifier,
-                    linkedin_api=linkedin_api,
-                )
+                if linkedin_api == "recruiter":
+                    result = unipile.recruiter.open_to_work(account_id, identifier)
+                else:
+                    profile = unipile.recruiter.get_profile(account_id, identifier, linkedin_api)
+                    result = {"provider_id": profile.get("provider_id") or profile.get("id"),
+                              "is_open_to_work": get_linkedin_profile_field(profile, "is_open_to_work")}
+                results = json.dumps(result, default=str)
                 return [types.TextContent(
                     type="text",
                     text=results,
@@ -448,14 +469,11 @@ async def main(base_url: Optional[str] = None, api_key: Optional[str] = None):
             else:
                 raise ValueError(f"Unknown tool: {name}")
 
+        except UnipileAPIError as e:
+            return types.CallToolResult(isError=True, content=[types.TextContent(type="text", text=json.dumps({"error": e.as_dict()}))])
         except Exception as e:
-            logger.error(f"Error executing tool {name}: {str(e)}")
-            return [types.TextContent(
-                type="text",
-                text=json.dumps({"error": str(e)}),
-                mimeType="application/json",
-                uri=AnyUrl("unipile://error")
-            )]
+            logger.error("Tool %s failed (%s)", name, type(e).__name__)
+            return types.CallToolResult(isError=True, content=[types.TextContent(type="text", text=json.dumps({"error": str(e)}))])
 
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         logger.info("Server running with stdio transport")
