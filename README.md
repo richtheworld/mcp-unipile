@@ -282,7 +282,7 @@ unipile-recruiter webhooks
 ```
 
 These commands return a **single bounded page**, including the provider's
-`next_cursor`. Pass it back with `--cursor`; invitation lists use `--offset`
+`next_cursor`. Pass it back with `--cursor`; invitation and webhook lists use `--offset`
 instead. A page is not a complete inbox or connection history. Maximum requested
 page size is 100. A disappeared invitation does not prove acceptance: reconcile
 with connections. Connection acceptance does not mean recruiting interest.
@@ -360,7 +360,8 @@ After reviewing the preview, repeat the arguments with `--execute` and `--confir
 if the send is authorized. Connection settings and pacing are fixed at MCP startup;
 MCP cannot switch to V1 or replace the credential through a tool call. Use inline
 JSON for `--body` in MCP; stdin (`-`) and local file inputs are disallowed.
-Raw `request` and `proxy` commands remain CLI-only; MCP uses the named operations.
+Raw `request`/`proxy` and project/pipeline mutations (`project-create`, `project-edit`,
+`save`) remain CLI-only; MCP allowlists the named outreach commands and sourcing reads.
 
 The existing `unipile_get_recent_messages` tool now accepts `inbox_id` (default
 `RECRUITER_PRIMARY`). Its result is a bounded envelope with per-chat message pages

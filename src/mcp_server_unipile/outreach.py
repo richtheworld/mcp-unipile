@@ -75,10 +75,12 @@ def request_for(command: str, account_id: str | None, options: dict[str, Any]) -
             raise ValueError('limit must be between 1 and 100')
         params['limit'] = limit
         if fields.get('cursor'):
-            if command == 'invitations':
-                raise ValueError('Invitations use offset pagination, not cursor')
+            if command in ('invitations', 'webhooks'):
+                raise ValueError('Invitations and webhooks use offset pagination, not cursor')
             params['cursor'] = fields['cursor']
         if fields.get('offset') is not None:
+            if command not in ('invitations', 'webhooks'):
+                raise ValueError('Use cursor pagination for this command')
             offset = fields['offset']
             if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
                 raise ValueError('offset must be a non-negative integer')
@@ -103,11 +105,16 @@ def request_for(command: str, account_id: str | None, options: dict[str, Any]) -
             body['users_ids'] = segment(fields.get('user_id'), 'user_id')
             inbox = fields['inbox_id']
             if inbox.startswith('RECRUITER_') and inbox.endswith('_PRIMARY'):
+                if not body['users_ids'].startswith('AE'):
+                    raise ValueError('Recruiter chats require a canonical AE Recruiter user ID; use convert-identifier first')
                 body['specifics'] = {'linkedin': {'recruiter': {
                     'subject': nonempty(fields.get('subject'), 'subject'),
                     'signature': nonempty(fields.get('signature'), 'signature'),
                 }}}
-            elif inbox != 'CLASSIC_PRIMARY':
+            elif inbox == 'CLASSIC_PRIMARY':
+                if not body['users_ids'].startswith('ACo'):
+                    raise ValueError('Classic chats require a Classic ACo user ID')
+            else:
                 raise ValueError('Start chats in CLASSIC_PRIMARY or RECRUITER_*_PRIMARY')
     elif command in ('webhook-create', 'webhook-update'):
         body = fields.get('body')

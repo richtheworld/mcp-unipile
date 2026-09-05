@@ -33,6 +33,9 @@ class OutreachTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             outreach.request_for('invitations', 'acc_123', {'cursor': 'wrong'})
         with self.assertRaises(ValueError):
+            outreach.request_for('webhooks', None, {'cursor': 'wrong'})
+        self.assertEqual(outreach.request_for('webhooks', None, {'offset': 20})['params']['offset'], 20)
+        with self.assertRaises(ValueError):
             outreach.request_for('invite', 'acc_123', {'user_id': 'AE-recruiter'})
 
     def test_recruiter_send_current_schema_and_content_bound_confirmation(self):
@@ -51,6 +54,13 @@ class OutreachTests(unittest.TestCase):
         self.client.direct_request.assert_not_called()
         outreach.run(self.client, 'chat-start', 'acc_123', confirmed)
         self.client.direct_request.assert_called_once_with(**preview['request'])
+
+    def test_identity_family_must_match_inbox(self):
+        for inbox, user in [('CLASSIC_PRIMARY', 'AE-person'), ('RECRUITER_PRIMARY', 'ACo-person')]:
+            with self.assertRaises(ValueError):
+                outreach.run(self.client, 'chat-start', 'acc_123', {'inbox_id': inbox, 'user_id': user,
+                    'text': 'Hi', 'subject': 'Role', 'signature': 'R'})
+        self.client.direct_request.assert_not_called()
 
     def test_all_mutations_preview_and_validate_before_network(self):
         cases = {
@@ -99,7 +109,7 @@ class OutreachTests(unittest.TestCase):
     def test_mcp_rejects_connection_override_and_bad_parser_inputs(self):
         wrapper = UnipileWrapper.__new__(UnipileWrapper)
         wrapper.recruiter = self.client
-        for args in [['--backend', 'v1', 'accounts'], ['--keychain', 'accounts'], ['unknown'], ['webhook-create', '--body', '-'], ['webhook-create', '--body=-'], ['webhook-create', '--body', '/tmp/private.json'], ['request', 'GET', '/v2/webhooks/endpoints/'], ['proxy', '--body', '{}']]:
+        for args in [['--backend', 'v1', 'accounts'], ['--keychain', 'accounts'], ['unknown'], ['webhook-create', '--body', '-'], ['webhook-create', '--body=-'], ['webhook-create', '--body', '/tmp/private.json'], ['request', 'GET', '/v2/webhooks/endpoints/'], ['proxy', '--body', '{}'], ['project-create', '--body', '{}'], ['project-edit', 'project1', '--body', '{}'], ['save', 'AE-person', '--project', 'p1', '--stage', 's1']]:
             with self.assertRaises(ValueError):
                 wrapper.recruiter_command(args)
         self.assertIn('help', wrapper.recruiter_command(['--help']))

@@ -143,8 +143,10 @@ def build_parser() -> argparse.ArgumentParser:
             item.add_argument("endpoint_id")
         if outreach.ENDPOINTS[name][0] == "GET":
             item.add_argument("--limit", type=int, default=20)
-            item.add_argument("--cursor")
-            item.add_argument("--offset", type=int)
+            if name in ("invitations", "webhooks"):
+                item.add_argument("--offset", type=int)
+            else:
+                item.add_argument("--cursor")
         else:
             add_mutation_args(item)
         if name == "invitations":

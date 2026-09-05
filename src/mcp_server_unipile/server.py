@@ -52,8 +52,13 @@ class UnipileWrapper:
             raise ValueError(output.getvalue().strip()) from None
         if args.backend != "v2" or args.keychain or args.base_url is not None or args.min_request_interval_seconds is not None:
             raise ValueError("MCP connection and pacing settings are fixed at startup; V2 only")
-        if args.command in ("request", "proxy"):
-            raise ValueError("Raw request/proxy commands are CLI-only; use the named MCP commands")
+        supported = set(outreach.ENDPOINTS) | {
+            "capabilities", "endpoint-map", "doctor", "accounts", "projects", "project",
+            "applicants", "profile", "open-to-work", "convert-identifier", "search",
+            "search-url", "search-parameters", "pipeline", "inmail-credits",
+        }
+        if args.command not in supported:
+            raise ValueError("Command is CLI-only; MCP supports named outreach operations and sourcing reads")
         for field in ("body", "params"):
             value = getattr(args, field, None)
             if value is not None and not value.lstrip().startswith("{"):
@@ -430,7 +435,8 @@ async def main(base_url: Optional[str] = None, api_key: Optional[str] = None):
                 if not isinstance(batch_size, int) or isinstance(batch_size, bool) or not 1 <= batch_size <= 20:
                     raise ValueError("batch_size must be between 1 and 20")
                 results = unipile.recent_messages(account_id, arguments.get("inbox_id", "RECRUITER_PRIMARY"), batch_size)
-                return [types.TextContent(type="text", text=json.dumps(results))]
+                return [types.TextContent(type="text", text=json.dumps(results),
+                                          mimeType="application/json", uri=AnyUrl(f"unipile://messages/{account_id}"))]
             elif name == "unipile_get_linkedin_open_to_work":
                 if not arguments:
                     raise ValueError("Missing arguments for unipile_get_linkedin_open_to_work")
