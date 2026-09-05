@@ -187,6 +187,11 @@ class RecruiterClient:
                 json=dict(body) if body is not None else None,
                 timeout=self.timeout,
             )
+        except requests.RequestException as error:
+            raise UnipileAPIError(
+                status_code=0, error_type="transport_error",
+                detail="Request failed before a confirmed response; do not automatically retry writes",
+            ) from error
         finally:
             self._last_request_completed_at = self._clock()
         if not response.ok:
