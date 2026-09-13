@@ -355,10 +355,31 @@ class RecruiterClient:
             base = self.search_people(account_id, search_body, limit=100)
             search_calls += 1
 
+        base, extra_calls = self._collect_search_pages(account_id, search_body, base)
+        search_calls += extra_calls
+        # Titles and employers can differ between profile and search indexes.
+        # Broaden filters, never identity: only the provider profile ID can match.
+        relaxed_bodies = []
+        if "job_title" in search_body:
+            relaxed_bodies.append({k: v for k, v in search_body.items() if k != "job_title"})
+        if "current_company" in search_body:
+            relaxed_bodies.append({k: v for k, v in search_body.items()
+                                   if k not in {"job_title", "current_company"}})
+        for relaxed in relaxed_bodies:
+            if target_id in self._search_result_ids(base):
+                break
+            search_body = relaxed
+            base = self.search_people(account_id, search_body, limit=100)
+            search_calls += 1
+            base, extra_calls = self._collect_search_pages(account_id, search_body, base)
+            search_calls += extra_calls
+
         spotlight_body = dict(search_body)
         spotlight_body["spotlights"] = ["OPEN_TO_WORK"]
         spotlight = self.search_people(account_id, spotlight_body, limit=100)
         search_calls += 1
+        spotlight, extra_calls = self._collect_search_pages(account_id, spotlight_body, spotlight)
+        search_calls += extra_calls
         result["recruiter_search_calls"] = search_calls
 
         base_ids = self._search_result_ids(base)
@@ -374,10 +395,10 @@ class RecruiterClient:
             result["is_open_to_work"] = False
             result["is_open_to_work_source"] = "recruiter_search_spotlight"
             result["search_fallback_status"] = "exact_complete_negative"
-        elif target_id not in base_ids:
-            result["search_fallback_status"] = "exact_id_missing_from_base"
-        else:
+        elif not base_complete or not spotlight_complete:
             result["search_fallback_status"] = "incomplete_search"
+        else:
+            result["search_fallback_status"] = "exact_id_missing_from_base"
 
         result["search_fallback_evidence"] = {
             "base_returned": len(self._items(base)),
@@ -388,6 +409,10 @@ class RecruiterClient:
             "spotlight_total_count": spotlight.get("total_count"),
             "spotlight_complete": spotlight_complete,
             "spotlight_exact_id_present": target_id in spotlight_ids,
+            "base_stop_reason": base.get("pagination_stop_reason"),
+            "spotlight_stop_reason": spotlight.get("pagination_stop_reason"),
+            "identity_match_field": "profile_id_to_search_id",
+            "filter_keys": sorted(search_body),
         }
         return result
 
@@ -403,13 +428,70 @@ class RecruiterClient:
             if item.get("id") or item.get("provider_id")
         }
 
+    def _collect_search_pages(
+        self, account_id: str, body: Mapping[str, Any], first: dict[str, Any]
+    ) -> tuple[dict[str, Any], int]:
+        """Read at most three provider-cursor pages; unstable/incomplete evidence stays unknown."""
+        items = self._items(first)
+        total = first.get("total_count")
+        ids = self._search_result_ids(first)
+        calls = 0
+        reason = "page_limit"
+        complete = False
+        page = first
+        cursors: set[str] = set()
+        while True:
+            if type(total) is not int or total < 0:
+                reason = "missing_total_count"
+                break
+            if len(ids) != len(items):
+                reason = "duplicate_or_missing_ids"
+                break
+            if len(items) == total and not page.get("next_cursor"):
+                complete, reason = True, "complete"
+                break
+            if len(items) > total:
+                reason = "inconsistent_total_count"
+                break
+            if not self._items(page):
+                reason = "empty_page_before_total"
+                break
+            if calls >= 2:
+                break
+            cursor = page.get("next_cursor")
+            if not isinstance(cursor, str) or not cursor:
+                reason = "missing_cursor"
+                break
+            if cursor in cursors:
+                reason = "repeated_cursor"
+                break
+            cursors.add(cursor)
+            page = self.search_people(account_id, body, limit=100, cursor=cursor)
+            calls += 1
+            if page.get("total_count") != total:
+                reason = "total_count_changed"
+                break
+            new_items = self._items(page)
+            new_ids = self._search_result_ids(page)
+            if ids.intersection(new_ids):
+                reason = "repeated_page"
+                break
+            items.extend(new_items)
+            ids.update(new_ids)
+        return {
+            "data": items, "total_count": total,
+            "pagination_complete": complete, "pagination_stop_reason": reason,
+        }, calls
+
     @classmethod
     def _search_page_complete(cls, page: Mapping[str, Any]) -> bool:
+        if "pagination_complete" in page:
+            return page["pagination_complete"] is True
         items = cls._items(page)
-        total_count = page.get("total_count")
-        if isinstance(total_count, int):
-            return total_count <= len(items)
-        return not bool(page.get("next_cursor"))
+        total = page.get("total_count")
+        return (type(total) is int and total >= 0 and total == len(items)
+                and len(cls._search_result_ids(page)) == len(items)
+                and not page.get("next_cursor"))
 
     @staticmethod
     def _exact_identity_search_body(
@@ -429,10 +511,12 @@ class RecruiterClient:
             "first_name": [first_name],
             "last_name": [last_name],
         }
-        for experience in profile.get("work_experience") or []:
+        specifics = profile.get("specifics") or {}
+        experiences = profile.get("work_experience") or specifics.get("experience") or []
+        for experience in experiences:
             if not isinstance(experience, Mapping):
                 continue
-            if experience.get("ended_on") not in {None, ""}:
+            if experience.get("ended_on") is not None and experience.get("ended_on") != "":
                 continue
             company = experience.get("company") or {}
             company_id = (
