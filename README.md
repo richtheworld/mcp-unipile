@@ -228,3 +228,30 @@ around that warning.
 ## License
 
 This project is licensed under the MIT License. 
+
+### Open-to-Work fallback evidence
+
+When Recruiter omits the direct status, the client reads work history from either
+`work_experience` search cards or `specifics.experience` profiles. It searches with
+name/company/title filters, then removes title and company restrictions when the
+exact profile ID is absent. Numeric `candidate_id` values are not profile IDs and
+are never substituted for them.
+
+Each search reads at most three pages of 100 candidates using provider-issued cursor
+pagination. Including optional first-page refinement and filter relaxation, an
+O2W lookup makes at most 13 search requests. Existing request pacing and immediate
+provider-error propagation still apply. Every successful search call is included
+in `recruiter_search_calls`.
+
+A negative requires the exact ID in the base results and complete base/spotlight
+coverage. Missing or changing totals, duplicate/missing IDs, repeated pages,
+premature empty pages, and the page cap preserve Unknown. Evidence includes
+pagination stop reasons and the final filter keys. `incomplete_search` takes
+precedence over target-absent when coverage is incomplete. A complete search that
+cannot find the profile remains `exact_id_missing_from_base`; it is not a No.
+
+Live contract check (13 September 2026): `/recruiter/search/people` rejects
+`offset` with HTTP 400 and returns `next_cursor`. Passing that cursor produced
+100 new IDs on page two. The implementation follows this verified endpoint
+contract rather than the guide's conflicting offset description. Missing or
+repeated cursors preserve Unknown; the client never invents a cursor.

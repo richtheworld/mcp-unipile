@@ -426,6 +426,7 @@ class RecruiterClientTests(unittest.TestCase):
                     "total_count": 2,
                     "next_cursor": "base-next",
                 },
+                {"data": [], "total_count": 2},
                 {"data": [], "total_count": 1, "next_cursor": "spotlight-next"},
             ]
         )
@@ -503,6 +504,119 @@ class RecruiterClientTests(unittest.TestCase):
             client.search_people.call_args_list[1].args[1]["current_company"],
             [{"id": "company-1", "priority": "MUST_HAVE"}],
         )
+
+    def test_live_profile_experience_schema(self):
+        profile = self._profile_with_missing_signal()
+        profile["specifics"]["experience"] = profile.pop("work_experience")
+        body = RecruiterClient._exact_identity_search_body(profile)
+        self.assertEqual(body["current_company"][0]["id"], "company-1")
+
+    def test_provider_cursor_search_contract(self):
+        client = RecruiterClient(api_key="secret")
+        client._request = Mock(return_value={})
+        client.search_people("acc_123", {}, limit=100, cursor="provider-issued")
+        self.assertEqual(client._request.call_args.kwargs["params"],
+                         {"limit": 100, "cursor": "provider-issued"})
+
+    def test_target_on_second_page_can_be_negative(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(return_value=self._profile_with_missing_signal())
+        client.search_people = Mock(side_effect=[
+            {"data": [{"id": "AE-other"}], "total_count": 2, "next_cursor": "next"},
+            {"data": [{"id": "AE-recruiter-id", "candidate_id": "123"}], "total_count": 2},
+            {"data": [], "total_count": 0},
+        ])
+        result = client.open_to_work("acc_123", "AE-recruiter-id")
+        self.assertIs(result["is_open_to_work"], False)
+        self.assertEqual(result["recruiter_search_calls"], 3)
+        self.assertEqual(client.search_people.call_args_list[1].kwargs["cursor"], "next")
+
+    def test_spotlight_positive_on_second_page(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(return_value=self._profile_with_missing_signal())
+        client.search_people = Mock(side_effect=[
+            {"data": [{"id": "AE-recruiter-id"}], "total_count": 1},
+            {"data": [{"id": "AE-other"}], "total_count": 2, "next_cursor": "next"},
+            {"data": [{"id": "AE-recruiter-id"}], "total_count": 2},
+        ])
+        self.assertIs(client.open_to_work("acc_123", "AE-recruiter-id")["is_open_to_work"], True)
+
+    def test_relaxes_stale_title_then_company(self):
+        client = RecruiterClient(api_key="secret")
+        client.get_profile = Mock(return_value=self._profile_with_missing_signal())
+        client.search_people = Mock(side_effect=[
+            {"data": [], "total_count": 0},
+            {"data": [], "total_count": 0},
+            {"data": [{"id": "AE-recruiter-id"}], "total_count": 1},
+            {"data": [], "total_count": 0},
+        ])
+        result = client.open_to_work("acc_123", "AE-recruiter-id")
+        self.assertIs(result["is_open_to_work"], False)
+        self.assertNotIn("job_title", client.search_people.call_args_list[1].args[1])
+        self.assertNotIn("current_company", client.search_people.call_args_list[2].args[1])
+        self.assertEqual(result["recruiter_search_calls"], 4)
+
+    def test_numeric_candidate_id_never_substitutes_for_profile_id(self):
+        client = RecruiterClient(api_key="secret")
+        profile = self._profile_with_missing_signal()
+        profile["work_experience"] = []
+        client.get_profile = Mock(return_value=profile)
+        client.search_people = Mock(return_value={"data": [
+            {"id": "AE-other", "candidate_id": "AE-recruiter-id"}], "total_count": 1})
+        result = client.open_to_work("acc_123", "AE-recruiter-id")
+        self.assertIsNone(result["is_open_to_work"])
+        self.assertEqual(result["search_fallback_status"], "exact_id_missing_from_base")
+
+    def test_pagination_fails_closed_for_unstable_or_missing_totals(self):
+        for first, second, reason in [
+            ({"data": [{"id": "a"}], "total_count": 2, "next_cursor": "next"},
+             {"data": [{"id": "a"}], "total_count": 2, "next_cursor": "next"}, "repeated_page"),
+            ({"data": [{"id": "a"}], "total_count": 2, "next_cursor": "next"},
+             {"data": [{"id": "b"}], "total_count": 3}, "total_count_changed"),
+            ({"data": [], "total_count": 2}, {}, "empty_page_before_total"),
+            ({"data": []}, {}, "missing_total_count"),
+            ({"data": [{"candidate_id": "123"}], "total_count": 1}, {}, "duplicate_or_missing_ids"),
+        ]:
+            with self.subTest(reason=reason):
+                client = RecruiterClient(api_key="secret")
+                client.search_people = Mock(return_value=second)
+                page, _ = client._collect_search_pages("acc_123", {}, first)
+                self.assertFalse(client._search_page_complete(page))
+                self.assertEqual(page["pagination_stop_reason"], reason)
+
+    def test_missing_or_repeated_cursor_stays_incomplete(self):
+        client = RecruiterClient(api_key="secret")
+        client.search_people = Mock(return_value={
+            "data": [{"id": "b"}], "total_count": 3, "next_cursor": "same"})
+        first = {"data": [{"id": "a"}], "total_count": 3}
+        page, calls = client._collect_search_pages("acc_123", {}, first)
+        self.assertEqual(page["pagination_stop_reason"], "missing_cursor")
+        self.assertEqual(calls, 0)
+        first["next_cursor"] = "same"
+        page, calls = client._collect_search_pages("acc_123", {}, first)
+        self.assertEqual(page["pagination_stop_reason"], "repeated_cursor")
+        self.assertFalse(page["pagination_complete"])
+        self.assertEqual(calls, 1)
+
+    def test_page_budget_is_bounded(self):
+        client = RecruiterClient(api_key="secret")
+        client.search_people = Mock(side_effect=[
+            {"data": [{"id": "b"}], "total_count": 4, "next_cursor": "two"},
+            {"data": [{"id": "c"}], "total_count": 4},
+        ])
+        page, calls = client._collect_search_pages(
+            "acc_123", {}, {"data": [{"id": "a"}], "total_count": 4, "next_cursor": "one"})
+        self.assertEqual(calls, 2)
+        self.assertFalse(page["pagination_complete"])
+        self.assertEqual(page["pagination_stop_reason"], "page_limit")
+
+    def test_provider_pushback_is_not_retried(self):
+        client = RecruiterClient(api_key="secret")
+        client.search_people = Mock(side_effect=UnipileAPIError(429, "rate_limit", "stop"))
+        with self.assertRaises(UnipileAPIError):
+            client._collect_search_pages("acc_123", {},
+                {"data": [{"id": "a"}], "total_count": 2, "next_cursor": "next"})
+        self.assertEqual(client.search_people.call_count, 1)
 
     def test_recruiter_search_parameters_use_post_body_contract(self):
         session = Mock()
