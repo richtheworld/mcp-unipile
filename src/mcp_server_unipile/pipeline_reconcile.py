@@ -182,6 +182,8 @@ def project_record(item: dict[str, Any]) -> dict[str, Any]:
     education = _sections(profile, "educations", ("schoolName", "degreeName", "startDateOn", "endDateOn"))
     skills = _sections(profile, "skills", ("skillName",))
     url = canonical_url(profile.get("publicProfileUrl"))
+    # Preserve the presence guard even when sanitization rejects the supplied URL.
+    public_profile_url_present = profile.get("publicProfileUrl") not in (None, "")
     unlinked, anonymized = profile.get("unlinked"), profile.get("anonymized")
     if not resolved:
         classification = "resolution_error"
@@ -200,6 +202,7 @@ def project_record(item: dict[str, Any]) -> dict[str, Any]:
         "entity_id": _text(item.get("entityUrn")), "recruiter_id": recruiter_id,
         "name": " ".join(filter(None, (_text(profile.get("firstName")), _text(profile.get("lastName"))))),
         "headline": _text(profile.get("headline")), "public_profile_url": url,
+        "public_profile_url_present": public_profile_url_present,
         "unlinked": unlinked if type(unlinked) is bool else None,
         "anonymized": anonymized if type(anonymized) is bool else None,
         "location": _text(location.get("displayName")) if isinstance(location, dict) else None,

@@ -1,5 +1,7 @@
 import copy
 import json
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,6 +29,33 @@ def acknowledgement(plan):
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_rejected_or_noncanonical_public_urls_are_preserved(self):
+        p, s = fixture()
+        for url in ("https://www.linkedin.com/in/example?token=secret",
+                    "https://www.linkedin.com/in/example#fragment", "noncanonical-profile", " "):
+            item = native_item(1, unlinked=True)
+            item["linkedInMemberProfileUrnResolutionResult"]["publicProfileUrl"] = url
+            s["records"][0] = inventory.project_record(item)
+            self.assertTrue(s["records"][0]["public_profile_url_present"])
+            self.assertEqual(archive.build_plan("acc_test", "456", "123", p, s)["targets"], [])
+        s["records"][0].pop("public_profile_url_present")
+        self.assertEqual(archive.build_plan("acc_test", "456", "123", p, s)["targets"], [])
+
+    def test_preview_manifest_private_even_with_permissive_umask_or_existing_file(self):
+        p, s = fixture(); c = RecruiterClient(api_key="synthetic")
+        c.get_project = Mock(return_value=p)
+        with tempfile.TemporaryDirectory() as directory, patch.object(inventory, "resolve_contract_id", return_value="123"), patch.object(inventory, "_snapshot", return_value=s):
+            path = Path(directory) / "plan.json"
+            previous_umask = os.umask(0)
+            try:
+                for existing in (False, True):
+                    if existing:
+                        path.chmod(0o666)
+                    archive.run(c, "acc_test", "456", str(path))
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            finally:
+                os.umask(previous_umask)
+
     def test_plan_uses_observed_native_mutation_and_only_unlinked_records(self):
         project, snapshot = fixture()
         plan = archive.build_plan("acc_test", "456", "123", project, snapshot)

@@ -3,6 +3,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import re
+import tempfile
 from typing import Any
 
 from . import pipeline_reconcile as inventory
@@ -13,7 +14,7 @@ NATIVE_URL = "https://www.linkedin.com/talent/api/graphql"
 
 
 def _identity(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    keys = ("entity_id", "recruiter_id", "public_profile_url", "stage_id", "classification", "unlinked", "anonymized")
+    keys = ("entity_id", "recruiter_id", "public_profile_url", "public_profile_url_present", "stage_id", "classification", "unlinked", "anonymized")
     return sorted(({key: r.get(key) for key in keys} for r in records), key=lambda r: r["entity_id"])
 
 
@@ -29,6 +30,7 @@ def build_plan(aid: str, project_id: str, contract_id: str, project: dict[str, A
     records = snapshot["records"]
     targets = [r for r in records if r.get("classification") == "imported_unlinked"
                and r.get("unlinked") is True and r.get("anonymized") is False
+               and r.get("public_profile_url_present") is False
                and not r.get("public_profile_url") and r.get("stage_id") != stage_id]
     if len(targets) > 100:
         raise ValueError("Native archive batch is limited to 100 records; no write was made")
@@ -82,7 +84,18 @@ def run(client: RecruiterClient, aid: str, project_id: str, plan_file: str, *,
         raise ValueError("Project counts changed during archive preflight; no write was made")
     plan = build_plan(aid, project_id, contract, project, before)
     if not execute:
-        path.write_text(json.dumps(plan, indent=2) + "\n")
+        # NamedTemporaryFile creates mode 0600 independently of the caller's umask.
+        # Atomic replacement also avoids truncating a pre-existing symlink target.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                             prefix=".archive-plan-", delete=False) as handle:
+                temporary = Path(handle.name)
+                handle.write(json.dumps(plan, indent=2) + "\n")
+            temporary.replace(path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return {"dry_run": True, "operation": "archive-unlinked", "project_id": project_id,
                 "target_count": len(plan["targets"]), "targets": plan["targets"], "plan_file": str(path),
                 "execute_with": {"execute": True, "confirm": plan["confirmation_token"]}}
