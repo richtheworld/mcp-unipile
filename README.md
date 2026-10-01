@@ -488,3 +488,36 @@ A caller's `confirmed` flag alone cannot confirm an identity: corroborating
 professional fields are required, conflicting profile URLs remain ambiguous,
 and every mapping is a suggestion for review. This command neither links nor
 removes imported Recruiter records.
+
+### Archive unlinked Recruiter records
+
+`pipeline-archive-unlinked` removes explicitly unlinked imported records from a
+project's active pipeline by moving them to its verified **Archived** stage.
+Linked profiles (including sparse profiles), anonymized/unknown records, and
+already archived records are preserved. This does not permanently delete data.
+
+```sh
+unipile-recruiter --backend v2 --keychain pipeline-archive-unlinked PROJECT_ID \
+  --plan-file ./archive-plan.json
+
+# Inspect the exact targets, then use the confirmation token from the dry run.
+unipile-recruiter --backend v2 --keychain pipeline-archive-unlinked PROJECT_ID \
+  --plan-file ./archive-plan.json --execute --confirm 'ARCHIVE_UNLINKED:PROJECT_ID:HASH'
+```
+
+The local manifest contains candidate identifiers and names; keep it private.
+Execution re-reads the entire project, validates stage counts, recreates the
+request, and rejects a changed inventory, edited manifest, or wrong token. A
+single native batch contains at most 100 targets. Calls use Unipile v2 with at
+least five seconds after each completed request; there is no v1 fallback.
+Readback must prove every target is archived and every retained record is
+unchanged before the command reports verified success. Failed or uncertain
+writes are never automatically retried: inspect a fresh inventory first.
+
+The operation uses Recruiter's native `talentHiringProjectCandidates` batch
+GraphQL mutation through Unipile's raw LinkedIn route. The native mutation and
+payload were verified live on 2026-10-01. The ordinary candidate-save endpoint
+returned 403 for archiving imported records and is not used for this command.
+Native query IDs can change; failure stops the operation rather than guessing
+another route. Archiving imports does not add replacement LinkedIn profiles:
+reconcile and save any needed linked replacements first.

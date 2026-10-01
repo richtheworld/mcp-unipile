@@ -88,7 +88,7 @@ class PipelineReconcileTests(unittest.TestCase):
         self.assertTrue(result["inventory_complete"])
         self.assertEqual(len(result["passes"]), 2)
         self.assertEqual(client.get_project.call_count, 4)
-        self.assertEqual(client.min_request_interval_seconds, 5)
+        self.assertEqual(client.min_request_interval_seconds, 0)
         self.assertTrue(all(call.args[1]["method"] == "GET" for call in client.proxy_request.call_args_list))
         self.assertEqual(result["coverage"], {"linked_with_sections": 1})
 

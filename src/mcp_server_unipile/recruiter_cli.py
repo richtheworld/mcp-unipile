@@ -37,6 +37,7 @@ CAPABILITIES = {
     ],
     "mutations_requiring_execute_and_confirmation": [
         "save candidate to project/pipeline",
+        "archive explicitly unlinked project records with a fresh manifest",
         "create project",
         "edit project",
         "raw LinkedIn proxy writes",
@@ -57,7 +58,7 @@ CAPABILITIES = {
 }
 
 
-from . import outreach, pipeline_reconcile
+from . import outreach, pipeline_reconcile, pipeline_archive
 
 
 V1_COMMANDS = {"accounts", "doctor", "projects", "project", "applicants", "request"}
@@ -264,6 +265,12 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--max-pages", type=int, default=100)
     reconcile.add_argument("--evidence", help="Professional identity evidence JSON object/file/-")
 
+    archive = sub.add_parser("pipeline-archive-unlinked", help="Preview or archive explicitly unlinked project records (v2)")
+    archive.add_argument("project_id")
+    archive.add_argument("--plan-file", required=True, help="Local manifest written by dry run and checked at execution")
+    archive.add_argument("--max-pages", type=int, default=100)
+    add_mutation_args(archive)
+
     save = sub.add_parser("save", help="Preview or save candidate into Recruiter project")
     save.add_argument("candidate_id", help="Recruiter candidate/profile ID")
     save.add_argument("--project", required=True, dest="project_id")
@@ -334,7 +341,7 @@ def get_client(args: argparse.Namespace) -> RecruiterClient | V1RecruiterClient:
             raise ValueError(
                 "UNIPILE_V2_MIN_REQUEST_INTERVAL_SECONDS must be a finite number"
             ) from error
-    if args.command in {"pipeline", "pipeline-reconcile"} and math.isfinite(interval_value):
+    if args.command in {"pipeline", "pipeline-reconcile", "pipeline-archive-unlinked"} and math.isfinite(interval_value):
         interval_value = max(5.0, interval_value)
     return RecruiterClient(
         api_key=api_key,
@@ -368,7 +375,7 @@ def dry_run(operation: str, token: str, request: Mapping[str, Any], **extra: Any
     }
 
 
-def execute(args: argparse.Namespace, client_override: Optional[RecruiterClient] = None) -> Any:
+def _execute(args: argparse.Namespace, client_override: Optional[RecruiterClient] = None) -> Any:
     if args.command == "capabilities":
         return {**CAPABILITIES, "outreach": outreach.endpoint_map()}
     if args.command == "endpoint-map":
@@ -394,7 +401,7 @@ def execute(args: argparse.Namespace, client_override: Optional[RecruiterClient]
     client = client_override or get_client(args)
     if client_override is not None and args.backend != "v2":
         raise ValueError("MCP uses V2 only")
-    if args.command in {"pipeline", "pipeline-reconcile"}:
+    if args.command in {"pipeline", "pipeline-reconcile", "pipeline-archive-unlinked"}:
         if not isinstance(client, RecruiterClient) or client.api_version != "v2":
             raise ValueError("Pipeline reconciliation requires the v2 client")
         client.min_request_interval_seconds = max(5.0, client.min_request_interval_seconds)
@@ -561,6 +568,9 @@ def execute(args: argparse.Namespace, client_override: Optional[RecruiterClient]
             offset=args.offset,
             limit=args.limit,
         )
+    if args.command == "pipeline-archive-unlinked":
+        return pipeline_archive.run(client, aid, args.project_id, args.plan_file,
+                                    execute=args.execute, confirm=args.confirm, max_pages=args.max_pages)
     if args.command == "pipeline-reconcile":
         return pipeline_reconcile.run(
             client, aid, args.project_id, args.contract_id,
@@ -630,6 +640,16 @@ def execute(args: argparse.Namespace, client_override: Optional[RecruiterClient]
             require_mutation(args, token)
         return client.proxy_request(aid, body)
     raise ValueError(f"Unknown command: {args.command}")
+
+
+def execute(args: argparse.Namespace, client_override: Optional[RecruiterClient] = None) -> Any:
+    if client_override is not None and args.command in {"pipeline", "pipeline-reconcile", "pipeline-archive-unlinked"}:
+        previous = client_override.min_request_interval_seconds
+        try:
+            return _execute(args, client_override)
+        finally:
+            client_override.min_request_interval_seconds = previous
+    return _execute(args, client_override)
 
 
 def main(argv: Optional[list[str]] = None) -> int:

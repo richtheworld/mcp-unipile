@@ -6,6 +6,7 @@ projected again here so unexpected fields or proxy response headers never escape
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from functools import wraps
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -26,6 +27,21 @@ DECORATION = (
     "hiringProjectRecruitingProfile~(entityUrn,currentHiringProjectCandidate("
     "candidateHiringState,previousCandidateHiringState)))"
 )
+
+
+def with_pipeline_pacing(function):
+    """Scope five-second pacing to this call, preserving shared MCP settings."""
+    @wraps(function)
+    def wrapped(client, *args, **kwargs):
+        if not isinstance(client, RecruiterClient):
+            return function(client, *args, **kwargs)
+        previous = client.min_request_interval_seconds
+        client.min_request_interval_seconds = max(5.0, previous)
+        try:
+            return function(client, *args, **kwargs)
+        finally:
+            client.min_request_interval_seconds = previous
+    return wrapped
 
 
 def validate_options(project_id: str, contract_id: str | None, max_passes: int, max_pages: int) -> None:
@@ -177,6 +193,8 @@ def project_record(item: dict[str, Any]) -> dict[str, Any]:
         classification = "linked_with_sections" if any((work, education, skills)) else "linked_sparse"
     else:
         classification = "unknown"
+    if anonymized is True:
+        profile, work, education, skills, url, recruiter_id = {}, [], [], [], None, None
     location = profile.get("location")
     return {
         "entity_id": _text(item.get("entityUrn")), "recruiter_id": recruiter_id,
@@ -226,7 +244,7 @@ def validate_evidence(payload: dict[str, Any]) -> list[dict[str, Any]]:
                     raise ValueError("Evidence source URL must be a string of at most 2000 characters")
                 try:
                     parsed = urlsplit(value)
-                    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port:
+                    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port or parsed.query or parsed.fragment:
                         raise ValueError("invalid provenance URL")
                 except ValueError as error:
                     raise ValueError("Evidence source URLs must use HTTPS without credentials or a custom port") from error
@@ -330,6 +348,7 @@ def _stage_check(project: dict[str, Any], records: list[dict[str, Any]]) -> dict
     return {"complete": not issues, "issues": issues, "counts": counts}
 
 
+@with_pipeline_pacing
 def list_page(client: RecruiterClient, aid: str, project_id: str, contract_id: str | None = None,
               *, limit: int = 25, offset: int = 0) -> dict[str, Any]:
     """Native replacement for the failing public pipeline wrapper, one page only."""
@@ -446,6 +465,7 @@ def _snapshot(client: RecruiterClient, aid: str, project_id: str, contract_id: s
             "total": total, "project_name": _text(project.get("name")), "stage_check": stage_check}
 
 
+@with_pipeline_pacing
 def run(client: RecruiterClient, aid: str, project_id: str, contract_id: str | None = None, *, max_passes: int = 3,
         max_pages: int = 100, evidence: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     validate_options(project_id, contract_id, max_passes, max_pages)
