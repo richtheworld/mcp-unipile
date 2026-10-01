@@ -166,7 +166,7 @@ unipile-recruiter open-to-work linkedin-public-slug
 unipile-recruiter open-to-work 'https://www.linkedin.com/talent/profile/AE...'
 unipile-recruiter search --body search.json --limit 25
 unipile-recruiter search-parameters LOCATION --keywords London
-unipile-recruiter pipeline PROJECT_ID --body '{"spotlights":["OPEN_TO_WORK"]}'
+unipile-recruiter pipeline PROJECT_ID --contract-id CONTRACT_ID --limit 25 --offset 0
 unipile-recruiter applicants V2_PROJECT_ID --limit 100
 unipile-recruiter --backend v1 applicants V1_JOB_ID --limit 250
 ```
@@ -399,3 +399,92 @@ References: [V2 keys](https://developer.unipile.com/v2.0/docs/api-keys),
 Run `python -m unittest discover -s tests` for the offline contract and regression
 suite. Use `doctor --outreach` for bounded live reads; its results contain no
 message bodies or signing secrets.
+
+### Reconcile native Recruiter pipeline profiles (read-only)
+
+The `pipeline` command now uses the verified native route, replacing its failing
+standard wrapper. Its pagination uses `--offset` and `--limit` (1–100):
+
+```sh
+unipile-recruiter --backend v2 --keychain pipeline PROJECT_ID \
+  --contract-id CONTRACT_ID --limit 25 --offset 0
+```
+
+The response contains `items`, `paging`, `page_valid` and `next_offset`. Only a
+valid page beginning at offset zero, containing the entire total, and agreeing
+with a fresh project stage-count read can claim `inventory_complete`. Legacy `--cursor` and nonempty `--body` filters are rejected
+before any API request; they are not silently discarded. Invalid pages and failed
+whole-inventory stage checks exit with code 2; a valid partial page exits 0 and
+provides its `next_offset`. For stable whole-project
+inventory and identity suggestions, use the command below.
+
+When the standard pipeline wrapper fails or omits profile sections, use the native
+pipeline search through the V2 Magic route:
+
+```sh
+unipile-recruiter --backend v2 --keychain pipeline-reconcile PROJECT_ID \
+  --contract-id CONTRACT_ID --max-passes 3 > reconciliation.json
+```
+
+Use the verified numeric Recruiter project ID. Both native pipeline commands
+resolve the single selected Recruiter contract automatically; optional
+`--contract-id` must be numeric and match that selected contract. Missing,
+ambiguous or malformed selected contracts stop before the project read. No
+contract is selected or changed by these commands. The reconciliation command reads the
+project name and stage counts, then pages `/talent/search/api/talentRecruiterSearchHits`
+with `q=pipelineSearch` and an explicit professional-profile decoration. It enforces
+at least five seconds after every provider response, including account discovery.
+The native request shape was verified on 1 October 2026; native LinkedIn contracts
+can change. No V1 fallback or LinkedIn mutation is performed.
+
+`inventory_complete: true` requires **two consecutive equal complete snapshots**,
+including exact paging, unique candidate entity IDs, verified project/contract
+membership on native identifiers, and agreement with project stage counts. The default limit is three passes of at most 100 pages each (100
+records per page); use `--max-pages` to change the bound. A single pass can have
+`snapshot_complete: true` but cannot establish a stable inventory. Exit code 2
+indicates an incomplete or unstable inventory. A provider error ends the loop and
+preserves the last complete snapshot, when available, with its age and pass proof.
+
+Records are classified as `linked_with_sections`, `linked_sparse`,
+`imported_unlinked`, `unknown` or `resolution_error`. Section counts describe only
+what the provider returned; they do not prove a full profile. The output contains
+professional employment/education/skills, stages, duplicate suggestions and a
+`next_actions` queue. Name-only collisions remain unresolved. Exact normalized
+name, company and title overlap can suggest an imported-to-linked mapping; records
+are never merged. No contacts, private notes, resumes, messages or proxy headers
+are exported.
+
+An optional evidence file lets a separate browser or Fiber investigation contribute
+professional identity evidence. This command does not call Fiber or automate a
+browser itself:
+
+```json
+{
+  "schema_version": 1,
+  "matches": [
+    {
+      "candidate_id": "EXACT_INVENTORY_ENTITY_URN_OR_RECRUITER_ID",
+      "public_profile_url": "https://www.linkedin.com/in/example-person",
+      "source": "fiber",
+      "match_status": "confirmed",
+      "confidence": 0.95,
+      "name": "Ada Example",
+      "company": "Example Engines",
+      "title": "Engineer"
+    }
+  ]
+}
+```
+
+Pass it with `--evidence evidence.json`. Allowed sources are `fiber`, `browser`,
+`linkedin_api`, `public_web`; allowed match statuses are `confirmed`, `possible`, `unresolved`.
+Optional `rationale` preserves up to 1,000 characters of professional identity
+reasoning, and `source_urls` preserves up to five HTTPS provenance URLs of at most
+2,000 characters each, without credentials or custom ports. Unresolved entries
+may omit the URL. `matched_recruiter_id` optionally references
+an exact linked record in the inventory and must agree with its public URL.
+Unsupported fields, unsafe URLs and absent/ambiguous target IDs are rejected.
+A caller's `confirmed` flag alone cannot confirm an identity: corroborating
+professional fields are required, conflicting profile URLs remain ambiguous,
+and every mapping is a suggestion for review. This command neither links nor
+removes imported Recruiter records.
