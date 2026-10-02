@@ -158,6 +158,7 @@ Read-only examples:
 
 ```sh
 unipile-recruiter doctor
+unipile-recruiter messaging-cost 'https://www.linkedin.com/talent/profile/AE...'
 unipile-recruiter projects --keywords Strala
 unipile-recruiter project 2107551666
 unipile-recruiter convert-identifier 'https://www.linkedin.com/talent/profile/AE...' --plan-only
@@ -166,7 +167,7 @@ unipile-recruiter open-to-work linkedin-public-slug
 unipile-recruiter open-to-work 'https://www.linkedin.com/talent/profile/AE...'
 unipile-recruiter search --body search.json --limit 25
 unipile-recruiter search-parameters LOCATION --keywords London
-unipile-recruiter pipeline PROJECT_ID --body '{"spotlights":["OPEN_TO_WORK"]}'
+unipile-recruiter pipeline PROJECT_ID --contract-id CONTRACT_ID --limit 25 --offset 0
 unipile-recruiter applicants V2_PROJECT_ID --limit 100
 unipile-recruiter --backend v1 applicants V1_JOB_ID --limit 250
 ```
@@ -361,7 +362,10 @@ if the send is authorized. Connection settings and pacing are fixed at MCP start
 MCP cannot switch to V1 or replace the credential through a tool call. Use inline
 JSON for `--body` in MCP; stdin (`-`) and local file inputs are disallowed.
 Raw `request`/`proxy` and project/pipeline mutations (`project-create`, `project-edit`,
-`save`) remain CLI-only; MCP allowlists the named outreach commands and sourcing reads.
+`save`) remain CLI-only; MCP allowlists the named outreach commands and a subset of sourcing reads.
+`pipeline-reconcile`, `pipeline-archive-unlinked`, and `messaging-cost` are
+CLI-only; the MCP wrapper deliberately rejects them. Local reconciliation
+evidence files are therefore never read through MCP.
 
 The existing `unipile_get_recent_messages` tool now accepts `inbox_id`. When omitted, it selects Recruiter if running,
 otherwise Classic for LinkedIn, and preserves the generic chat route for other
@@ -399,3 +403,167 @@ References: [V2 keys](https://developer.unipile.com/v2.0/docs/api-keys),
 Run `python -m unittest discover -s tests` for the offline contract and regression
 suite. Use `doctor --outreach` for bounded live reads; its results contain no
 message bodies or signing secrets.
+
+### Reconcile native Recruiter pipeline profiles (read-only)
+
+The `pipeline` command now uses the verified native route, replacing its failing
+standard wrapper. Its pagination uses `--offset` and `--limit` (1–100):
+
+```sh
+unipile-recruiter --backend v2 --keychain pipeline PROJECT_ID \
+  --contract-id CONTRACT_ID --limit 25 --offset 0
+```
+
+The response contains `items`, `paging`, `page_valid` and `next_offset`. Only a
+valid page beginning at offset zero, containing the entire total, and agreeing
+with a fresh project stage-count read can claim `inventory_complete`. Legacy `--cursor` and nonempty `--body` filters are rejected
+before any API request; they are not silently discarded. Invalid pages and failed
+whole-inventory stage checks exit with code 2; a valid partial page exits 0 and
+provides its `next_offset`. For stable whole-project
+inventory and identity suggestions, use the command below.
+
+When the standard pipeline wrapper fails or omits profile sections, use the native
+pipeline search through the V2 Magic route:
+
+```sh
+unipile-recruiter --backend v2 --keychain pipeline-reconcile PROJECT_ID \
+  --contract-id CONTRACT_ID --max-passes 3 > reconciliation.json
+```
+
+Use the verified numeric Recruiter project ID. Both native pipeline commands
+resolve the single selected Recruiter contract automatically; optional
+`--contract-id` must be numeric and match that selected contract. Missing,
+ambiguous or malformed selected contracts stop before the project read. No
+contract is selected or changed by these commands. The reconciliation command reads the
+project name and stage counts, then pages `/talent/search/api/talentRecruiterSearchHits`
+with `q=pipelineSearch` and an explicit professional-profile decoration. It enforces
+at least five seconds after every provider response, including account discovery.
+The native request shape was verified on 1 October 2026; native LinkedIn contracts
+can change. No V1 fallback or LinkedIn mutation is performed.
+
+`inventory_complete: true` requires **two consecutive equal complete snapshots**,
+including exact paging, unique candidate entity IDs, verified project/contract
+membership on native identifiers, and agreement with project stage counts. The default limit is three passes of at most 100 pages each (100
+records per page); use `--max-pages` to change the bound. A single pass can have
+`snapshot_complete: true` but cannot establish a stable inventory. Exit code 2
+indicates an incomplete or unstable inventory. A provider error ends the loop and
+preserves the last complete snapshot, when available, with its age and pass proof.
+
+Records are classified as `linked_with_sections`, `linked_sparse`,
+`imported_unlinked`, `unknown` or `resolution_error`. Section counts describe only
+what the provider returned; they do not prove a full profile. The output contains
+professional employment/education/skills, stages, duplicate suggestions and a
+`next_actions` queue. Name-only collisions remain unresolved. Exact normalized
+name, company and title overlap can suggest an imported-to-linked mapping; records
+are never merged. No contacts, private notes, resumes, messages or proxy headers
+are exported.
+
+An optional evidence file lets a separate browser or Fiber investigation contribute
+professional identity evidence. This command does not call Fiber or automate a
+browser itself:
+
+```json
+{
+  "schema_version": 1,
+  "matches": [
+    {
+      "candidate_id": "EXACT_INVENTORY_ENTITY_URN_OR_RECRUITER_ID",
+      "public_profile_url": "https://www.linkedin.com/in/example-person",
+      "source": "fiber",
+      "match_status": "confirmed",
+      "confidence": 0.95,
+      "name": "Ada Example",
+      "company": "Example Engines",
+      "title": "Engineer"
+    }
+  ]
+}
+```
+
+Pass it with `--evidence evidence.json`. Allowed sources are `fiber`, `browser`,
+`linkedin_api`, `public_web`; allowed match statuses are `confirmed`, `possible`, `unresolved`.
+Optional `rationale` preserves up to 1,000 characters of professional identity
+reasoning, and `source_urls` preserves up to five HTTPS provenance URLs of at most
+2,000 characters each, without credentials or custom ports. Unresolved entries
+may omit the URL. `matched_recruiter_id` optionally references
+an exact linked record in the inventory and must agree with its public URL.
+Unsupported fields, unsafe URLs and absent/ambiguous target IDs are rejected.
+A caller's `confirmed` flag alone cannot confirm an identity: corroborating
+professional fields are required, conflicting profile URLs remain ambiguous,
+and every mapping is a suggestion for review. This command neither links nor
+removes imported Recruiter records.
+
+### Archive unlinked Recruiter records
+
+`pipeline-archive-unlinked` removes explicitly unlinked imported records from a
+project's active pipeline by moving them to its verified **Archived** stage.
+Linked profiles (including sparse profiles), anonymized/unknown records, and
+already archived records are preserved. This does not permanently delete data.
+
+```sh
+unipile-recruiter --backend v2 --keychain pipeline-archive-unlinked PROJECT_ID \
+  --plan-file ./archive-plan.json
+
+# Inspect the exact targets, then use the confirmation token from the dry run.
+unipile-recruiter --backend v2 --keychain pipeline-archive-unlinked PROJECT_ID \
+  --plan-file ./archive-plan.json --execute --confirm 'ARCHIVE_UNLINKED:PROJECT_ID:HASH'
+```
+
+The local manifest contains candidate identifiers and names; keep it private.
+Execution re-reads the entire project, validates stage counts, recreates the
+request, and rejects a changed inventory, edited manifest, or wrong token. A
+single native batch contains at most 100 targets. Calls use Unipile v2 with at
+least five seconds after each completed request; there is no v1 fallback.
+Readback must prove every target is archived and every retained record is
+unchanged before the command reports verified success. Failed or uncertain
+writes are never automatically retried: inspect a fresh inventory first.
+
+The operation uses Recruiter's native `talentHiringProjectCandidates` batch
+GraphQL mutation through Unipile's raw LinkedIn route. The native mutation and
+payload were verified live on 2026-10-01. The ordinary candidate-save endpoint
+returned 403 for archiving imported records and is not used for this command.
+Native query IDs can change; failure stops the operation rather than guessing
+another route. Archiving imports does not add replacement LinkedIn profiles:
+reconcile and save any needed linked replacements first.
+
+### Candidate messaging credit estimate
+
+`messaging-cost IDENTIFIER` reads the candidate in the connected account's Recruiter
+context and returns `status` (`free`, `requires_credit`, `unknown`, or `unavailable`),
+`expected_inmail_credits` (0, 1, or null), the relevant profile signals and a UTC
+check time. It uses no sending endpoint and omits candidate contact details.
+
+Open Profile and first-degree connections imply zero credits. A reachable
+non-connection with an explicitly closed profile implies one credit. Missing or
+invalid fields remain unknown; Open to Work is not a free-message signal.
+`can_send_inmail=false` is unavailable unless the recipient is a first-degree
+connection, which can receive ordinary connection messages without InMail.
+This estimate applies to initial contact, not follow-ups or existing chats. It
+does not calculate currency cost or check the credit balance (`inmail-credits`
+is separate); free sends remain subject to provider limits and sometimes require
+a positive credit balance. Profile reads are paced at least five seconds apart.
+
+Sources: [LinkedIn message types](https://www.linkedin.com/help/linkedin/answer/a417258)
+and [Unipile provider limits](https://developer.unipile.com/docs/provider-limits-and-restrictions).
+
+For an authoritative project-specific quote, use:
+
+```sh
+unipile-recruiter --backend v2 --keychain messaging-cost AE_CANDIDATE_ID --project-id PROJECT_ID
+```
+
+This mode uses the native Recruiter composer read observed and verified on
+2026-10-02: `talentRecipientInMailCostInfo`. It validates the selected Recruiter
+contract and project, then reads the recipient's `inMailCost` (0/1) and
+`canAcceptInMails`. The response must contain exactly the requested recipient
+identity; contact information is excluded from CLI output. An optional
+`--contract-id` must match the selected contract. No composer or message is
+created. The endpoint is an observed native LinkedIn query through Unipile v2,
+not a documented first-class Unipile wrapper, and its query ID can change.
+
+Prefer this project mode when the standard Recruiter profile omits
+`is_open_profile`. Native `privacySettings.allowOpenlinkSearch` alone is also
+insufficient: an observed positive candidate still cost one credit in the
+Recruiter composer. Classic profile eligibility must not be substituted for
+Recruiter eligibility. Without `--project-id`, the older profile-based
+estimate remains available and conservatively returns unknown for absent flags.

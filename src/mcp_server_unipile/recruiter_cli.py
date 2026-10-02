@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Optional
+from . import messaging_cost
 
 from .recruiter_client import (
     DEFAULT_BASE_URL,
@@ -30,11 +32,14 @@ CAPABILITIES = {
         "Recruiter people search",
         "Recruiter search parameters",
         "pipeline candidates",
+        "read-only pipeline identity and profile reconciliation (v2)",
         "InMail credits",
+        "read-only candidate messaging credit estimate (v2)",
         "arbitrary API GET requests",
     ],
     "mutations_requiring_execute_and_confirmation": [
         "save candidate to project/pipeline",
+        "archive explicitly unlinked project records with a fresh manifest",
         "create project",
         "edit project",
         "raw LinkedIn proxy writes",
@@ -55,7 +60,7 @@ CAPABILITIES = {
 }
 
 
-from . import outreach
+from . import outreach, pipeline_reconcile, pipeline_archive
 
 
 V1_COMMANDS = {"accounts", "doctor", "projects", "project", "applicants", "request"}
@@ -208,6 +213,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Candidate ID, LinkedIn /in/ profile, or Recruiter profile URL",
     )
 
+    cost = sub.add_parser("messaging-cost", help="Estimate initial Recruiter contact: free, one credit, unknown or unavailable (read-only)")
+    cost.add_argument("identifier", help="Recruiter candidate ID or supported LinkedIn profile reference")
+    cost.add_argument("--project-id", help="Use Recruiter's direct per-recipient credit quote for this project")
+    cost.add_argument("--contract-id", help="Numeric contract ID; must match the selected Recruiter contract")
+
     convert = sub.add_parser(
         "convert-identifier",
         help="Convert a LinkedIn profile reference to the canonical v2 identity schema",
@@ -245,11 +255,28 @@ def build_parser() -> argparse.ArgumentParser:
     params.add_argument("--offset", type=int)
     params.add_argument("--limit", type=int, default=100)
 
-    pipeline = sub.add_parser("pipeline", help="List/filter project pipeline candidates")
+    pipeline = sub.add_parser("pipeline", help="Read a native Recruiter pipeline page (v2)")
     pipeline.add_argument("project_id")
-    pipeline.add_argument("--body", help="Optional filter JSON object/file/-")
+    pipeline.add_argument("--body", help="Legacy filters are unsupported by the native route")
     pipeline.add_argument("--limit", type=int, default=25)
-    pipeline.add_argument("--cursor")
+    pipeline.add_argument("--cursor", help="Unsupported; native pipeline uses --offset")
+    pipeline.add_argument("--offset", type=int, default=0)
+    pipeline.add_argument("--contract-id", help="Numeric ID; must match the selected Recruiter contract")
+
+    reconcile = sub.add_parser(
+        "pipeline-reconcile", help="Read-only native pipeline/profile reconciliation (v2)"
+    )
+    reconcile.add_argument("project_id")
+    reconcile.add_argument("--contract-id", help="Numeric ID; defaults to the selected Recruiter contract")
+    reconcile.add_argument("--max-passes", type=int, default=3)
+    reconcile.add_argument("--max-pages", type=int, default=100)
+    reconcile.add_argument("--evidence", help="Professional identity evidence JSON object/file/-")
+
+    archive = sub.add_parser("pipeline-archive-unlinked", help="Preview or archive explicitly unlinked project records (v2)")
+    archive.add_argument("project_id")
+    archive.add_argument("--plan-file", required=True, help="Local manifest written by dry run and checked at execution")
+    archive.add_argument("--max-pages", type=int, default=100)
+    add_mutation_args(archive)
 
     save = sub.add_parser("save", help="Preview or save candidate into Recruiter project")
     save.add_argument("candidate_id", help="Recruiter candidate/profile ID")
@@ -321,6 +348,8 @@ def get_client(args: argparse.Namespace) -> RecruiterClient | V1RecruiterClient:
             raise ValueError(
                 "UNIPILE_V2_MIN_REQUEST_INTERVAL_SECONDS must be a finite number"
             ) from error
+    if args.command in {"pipeline", "pipeline-reconcile", "pipeline-archive-unlinked"} and math.isfinite(interval_value):
+        interval_value = max(5.0, interval_value)
     return RecruiterClient(
         api_key=api_key,
         base_url=args.base_url or os.getenv("UNIPILE_V2_BASE_URL", DEFAULT_BASE_URL),
@@ -353,7 +382,7 @@ def dry_run(operation: str, token: str, request: Mapping[str, Any], **extra: Any
     }
 
 
-def execute(args: argparse.Namespace, client_override: Optional[RecruiterClient] = None) -> Any:
+def _execute(args: argparse.Namespace, client_override: Optional[RecruiterClient] = None) -> Any:
     if args.command == "capabilities":
         return {**CAPABILITIES, "outreach": outreach.endpoint_map()}
     if args.command == "endpoint-map":
@@ -366,9 +395,23 @@ def execute(args: argparse.Namespace, client_override: Optional[RecruiterClient]
         )
     if args.backend == "v1" and args.command == "request" and args.method not in READ_METHODS:
         raise ValueError("Unipile v1 is read-only; mutation requests are disabled")
+    evidence: list[dict[str, Any]] = []
+    if args.command == "pipeline":
+        pipeline_reconcile.validate_options(args.project_id, args.contract_id, 1, 1)
+        if args.cursor or load_json(args.body):
+            raise ValueError("Native pipeline does not support legacy --cursor/--body filters; use --offset")
+        if not 1 <= args.limit <= 100 or args.offset < 0:
+            raise ValueError("Native pipeline requires limit 1–100 and non-negative offset")
+    if args.command == "pipeline-reconcile":
+        pipeline_reconcile.validate_options(args.project_id, args.contract_id, args.max_passes, args.max_pages)
+        evidence = pipeline_reconcile.validate_evidence(load_json(args.evidence))
     client = client_override or get_client(args)
     if client_override is not None and args.backend != "v2":
         raise ValueError("MCP uses V2 only")
+    if args.command in {"pipeline", "pipeline-reconcile", "pipeline-archive-unlinked", "messaging-cost"}:
+        if not isinstance(client, RecruiterClient) or client.api_version != "v2":
+            raise ValueError("Pipeline reconciliation requires the v2 client")
+        client.min_request_interval_seconds = max(5.0, client.min_request_interval_seconds)
     if args.command in outreach.ENDPOINTS:
         options = vars(args).copy()
         if options.get("body"):
@@ -511,6 +554,27 @@ def execute(args: argparse.Namespace, client_override: Optional[RecruiterClient]
         return client.edit_project(aid, args.project_id, body)
     if args.command == "profile":
         return client.get_profile(aid, args.identifier, args.variant)
+    if args.command == "messaging-cost":
+        if args.project_id:
+            pipeline_reconcile.validate_options(args.project_id, args.contract_id, 1, 1)
+            contract = pipeline_reconcile.resolve_contract_id(client, aid, args.contract_id)
+            project = client.get_project(aid, args.project_id)
+            if not isinstance(project, dict) or str(project.get("id")) != args.project_id:
+                raise ValueError("Recruiter cost project identity mismatch")
+            identifier = profile_identifier_schema(args.identifier)["normalized_identifier"]
+            if not identifier.startswith("AE"):
+                profile, _ = client.resolve_recruiter_profile(aid, identifier)
+                resolved = profile.get("provider_id") or profile.get("id")
+                if not isinstance(resolved, str) or not resolved.strip():
+                    raise ValueError("Recruiter profile did not return a usable recipient identity")
+                identifier = profile_identifier_schema(resolved)["normalized_identifier"]
+            request = messaging_cost.native_request(args.project_id, contract, [identifier])
+            response = client.proxy_request(aid, request)
+            return {**messaging_cost.parse_native(response, [identifier])[identifier], "project_id": args.project_id}
+        if args.contract_id:
+            raise ValueError("--contract-id requires --project-id")
+        profile, calls = client.resolve_recruiter_profile(aid, args.identifier)
+        return {**messaging_cost.assess(profile), "profile_calls": calls}
     if args.command == "open-to-work":
         return client.open_to_work(aid, args.identifier)
     if args.command == "convert-identifier":
@@ -532,14 +596,18 @@ def execute(args: argparse.Namespace, client_override: Optional[RecruiterClient]
             offset=args.offset,
             limit=args.limit,
         )
-    if args.command == "pipeline":
-        return client.list_pipeline(
-            aid,
-            args.project_id,
-            load_json(args.body),
-            cursor=args.cursor,
-            limit=args.limit,
+    if args.command == "pipeline-archive-unlinked":
+        return pipeline_archive.run(client, aid, args.project_id, args.plan_file,
+                                    execute=args.execute, confirm=args.confirm, max_pages=args.max_pages)
+    if args.command == "pipeline-reconcile":
+        return pipeline_reconcile.run(
+            client, aid, args.project_id, args.contract_id,
+            max_passes=args.max_passes, max_pages=args.max_pages, evidence=evidence,
         )
+    if args.command == "pipeline":
+        return pipeline_reconcile.list_page(client, aid, args.project_id, args.contract_id,
+                                            limit=args.limit, offset=args.offset)
+
     if args.command == "save":
         project = None
         if not args.skip_project_check:
@@ -602,12 +670,28 @@ def execute(args: argparse.Namespace, client_override: Optional[RecruiterClient]
     raise ValueError(f"Unknown command: {args.command}")
 
 
+def execute(args: argparse.Namespace, client_override: Optional[RecruiterClient] = None) -> Any:
+    if client_override is not None and args.command in {"pipeline", "pipeline-reconcile", "pipeline-archive-unlinked", "messaging-cost"}:
+        previous = client_override.min_request_interval_seconds
+        try:
+            return _execute(args, client_override)
+        finally:
+            client_override.min_request_interval_seconds = previous
+    return _execute(args, client_override)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         result = execute(args)
         print_json(result, pretty=not args.compact)
+        if args.command == "pipeline":
+            stage_check = result.get("stage_check")
+            if not result.get("page_valid") or (stage_check is not None and not stage_check.get("complete")):
+                return 2
+        if args.command == "pipeline-reconcile" and not result.get("inventory_complete"):
+            return 2
         return 2 if args.command == "doctor" and not result.get("ok") else 0
     except UnipileAPIError as error:
         print_json({"error": error.as_dict()}, pretty=not args.compact)
