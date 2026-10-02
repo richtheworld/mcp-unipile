@@ -542,3 +542,25 @@ a positive credit balance. Profile reads are paced at least five seconds apart.
 
 Sources: [LinkedIn message types](https://www.linkedin.com/help/linkedin/answer/a417258)
 and [Unipile provider limits](https://developer.unipile.com/docs/provider-limits-and-restrictions).
+
+For an authoritative project-specific quote, use:
+
+```sh
+unipile-recruiter --backend v2 --keychain messaging-cost AE_CANDIDATE_ID --project-id PROJECT_ID
+```
+
+This mode uses the native Recruiter composer read observed and verified on
+2026-10-02: `talentRecipientInMailCostInfo`. It validates the selected Recruiter
+contract and project, then reads the recipient's `inMailCost` (0/1) and
+`canAcceptInMails`. The response must contain exactly the requested recipient
+identity; contact information is excluded from CLI output. An optional
+`--contract-id` must match the selected contract. No composer or message is
+created. The endpoint is an observed native LinkedIn query through Unipile v2,
+not a documented first-class Unipile wrapper, and its query ID can change.
+
+Prefer this project mode when the standard Recruiter profile omits
+`is_open_profile`. Native `privacySettings.allowOpenlinkSearch` alone is also
+insufficient: an observed positive candidate still cost one credit in the
+Recruiter composer. Classic profile eligibility must not be substituted for
+Recruiter eligibility. Without `--project-id`, the older profile-based
+estimate remains available and conservatively returns unknown for absent flags.

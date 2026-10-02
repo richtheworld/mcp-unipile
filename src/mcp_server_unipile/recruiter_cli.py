@@ -215,6 +215,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     cost = sub.add_parser("messaging-cost", help="Estimate initial Recruiter contact: free, one credit, unknown or unavailable (read-only)")
     cost.add_argument("identifier", help="Recruiter candidate ID or supported LinkedIn profile reference")
+    cost.add_argument("--project-id", help="Use Recruiter's direct per-recipient credit quote for this project")
+    cost.add_argument("--contract-id", help="Numeric contract ID; must match the selected Recruiter contract")
 
     convert = sub.add_parser(
         "convert-identifier",
@@ -553,6 +555,21 @@ def _execute(args: argparse.Namespace, client_override: Optional[RecruiterClient
     if args.command == "profile":
         return client.get_profile(aid, args.identifier, args.variant)
     if args.command == "messaging-cost":
+        if args.project_id:
+            pipeline_reconcile.validate_options(args.project_id, args.contract_id, 1, 1)
+            contract = pipeline_reconcile.resolve_contract_id(client, aid, args.contract_id)
+            project = client.get_project(aid, args.project_id)
+            if not isinstance(project, dict) or str(project.get("id")) != args.project_id:
+                raise ValueError("Recruiter cost project identity mismatch")
+            identifier = profile_identifier_schema(args.identifier)["normalized_identifier"]
+            if not identifier.startswith("AE"):
+                profile, _ = client.resolve_recruiter_profile(aid, identifier)
+                identifier = profile.get("provider_id") or profile.get("id")
+            request = messaging_cost.native_request(args.project_id, contract, [identifier])
+            response = client.proxy_request(aid, request)
+            return {**messaging_cost.parse_native(response, [identifier])[identifier], "project_id": args.project_id}
+        if args.contract_id:
+            raise ValueError("--contract-id requires --project-id")
         profile, calls = client.resolve_recruiter_profile(aid, args.identifier)
         return {**messaging_cost.assess(profile), "profile_calls": calls}
     if args.command == "open-to-work":
