@@ -564,7 +564,10 @@ def _execute(args: argparse.Namespace, client_override: Optional[RecruiterClient
             identifier = profile_identifier_schema(args.identifier)["normalized_identifier"]
             if not identifier.startswith("AE"):
                 profile, _ = client.resolve_recruiter_profile(aid, identifier)
-                identifier = profile.get("provider_id") or profile.get("id")
+                resolved = profile.get("provider_id") or profile.get("id")
+                if not isinstance(resolved, str) or not resolved.strip():
+                    raise ValueError("Recruiter profile did not return a usable recipient identity")
+                identifier = profile_identifier_schema(resolved)["normalized_identifier"]
             request = messaging_cost.native_request(args.project_id, contract, [identifier])
             response = client.proxy_request(aid, request)
             return {**messaging_cost.parse_native(response, [identifier])[identifier], "project_id": args.project_id}

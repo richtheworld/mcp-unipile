@@ -362,7 +362,10 @@ if the send is authorized. Connection settings and pacing are fixed at MCP start
 MCP cannot switch to V1 or replace the credential through a tool call. Use inline
 JSON for `--body` in MCP; stdin (`-`) and local file inputs are disallowed.
 Raw `request`/`proxy` and project/pipeline mutations (`project-create`, `project-edit`,
-`save`) remain CLI-only; MCP allowlists the named outreach commands and sourcing reads.
+`save`) remain CLI-only; MCP allowlists the named outreach commands and a subset of sourcing reads.
+`pipeline-reconcile`, `pipeline-archive-unlinked`, and `messaging-cost` are
+CLI-only; the MCP wrapper deliberately rejects them. Local reconciliation
+evidence files are therefore never read through MCP.
 
 The existing `unipile_get_recent_messages` tool now accepts `inbox_id`. When omitted, it selects Recruiter if running,
 otherwise Classic for LinkedIn, and preserves the generic chat route for other

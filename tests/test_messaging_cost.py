@@ -119,3 +119,19 @@ class NativeMessagingCostTests(unittest.TestCase):
             execute(args, client)
         client.proxy_request.assert_not_called()
         self.assertEqual(client.min_request_interval_seconds, previous)
+
+    def test_cli_normalizes_resolved_recruiter_profile_url(self):
+        client = RecruiterClient('test', session=Mock())
+        client.get_linkedin_contracts = Mock(return_value={'contracts': [{'product': 'recruiter', 'selected': True, 'id': 'RECRUITER_456'}]})
+        client.get_project = Mock(return_value={'id': '123'})
+        client.resolve_recruiter_profile = Mock(return_value=({'id': 'https://www.linkedin.com/talent/profile/AEexample?project=123'}, 2))
+        client.proxy_request = Mock(return_value=self.response(cost=0))
+        args = build_parser().parse_args(['--account-id', 'acc_test', 'messaging-cost', 'https://www.linkedin.com/in/example', '--project-id', '123'])
+        result = execute(args, client)
+        self.assertEqual(result['expected_inmail_credits'], 0)
+        self.assertIn('urn%3Ali%3Ats_profile%3AAEexample', client.proxy_request.call_args.args[1]['query_params']['variables'])
+        client.resolve_recruiter_profile.return_value = ({'id': None}, 2)
+        client.proxy_request.reset_mock()
+        with self.assertRaises(ValueError):
+            execute(args, client)
+        client.proxy_request.assert_not_called()
