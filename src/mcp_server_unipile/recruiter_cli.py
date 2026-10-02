@@ -10,6 +10,7 @@ import sys
 import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Optional
+from . import messaging_cost
 
 from .recruiter_client import (
     DEFAULT_BASE_URL,
@@ -33,6 +34,7 @@ CAPABILITIES = {
         "pipeline candidates",
         "read-only pipeline identity and profile reconciliation (v2)",
         "InMail credits",
+        "read-only candidate messaging credit estimate (v2)",
         "arbitrary API GET requests",
     ],
     "mutations_requiring_execute_and_confirmation": [
@@ -210,6 +212,9 @@ def build_parser() -> argparse.ArgumentParser:
         "identifier",
         help="Candidate ID, LinkedIn /in/ profile, or Recruiter profile URL",
     )
+
+    cost = sub.add_parser("messaging-cost", help="Estimate initial Recruiter contact: free, one credit, unknown or unavailable (read-only)")
+    cost.add_argument("identifier", help="Recruiter candidate ID or supported LinkedIn profile reference")
 
     convert = sub.add_parser(
         "convert-identifier",
@@ -401,7 +406,7 @@ def _execute(args: argparse.Namespace, client_override: Optional[RecruiterClient
     client = client_override or get_client(args)
     if client_override is not None and args.backend != "v2":
         raise ValueError("MCP uses V2 only")
-    if args.command in {"pipeline", "pipeline-reconcile", "pipeline-archive-unlinked"}:
+    if args.command in {"pipeline", "pipeline-reconcile", "pipeline-archive-unlinked", "messaging-cost"}:
         if not isinstance(client, RecruiterClient) or client.api_version != "v2":
             raise ValueError("Pipeline reconciliation requires the v2 client")
         client.min_request_interval_seconds = max(5.0, client.min_request_interval_seconds)
@@ -547,6 +552,9 @@ def _execute(args: argparse.Namespace, client_override: Optional[RecruiterClient
         return client.edit_project(aid, args.project_id, body)
     if args.command == "profile":
         return client.get_profile(aid, args.identifier, args.variant)
+    if args.command == "messaging-cost":
+        profile, calls = client.resolve_recruiter_profile(aid, args.identifier)
+        return {**messaging_cost.assess(profile), "profile_calls": calls}
     if args.command == "open-to-work":
         return client.open_to_work(aid, args.identifier)
     if args.command == "convert-identifier":
@@ -643,7 +651,7 @@ def _execute(args: argparse.Namespace, client_override: Optional[RecruiterClient
 
 
 def execute(args: argparse.Namespace, client_override: Optional[RecruiterClient] = None) -> Any:
-    if client_override is not None and args.command in {"pipeline", "pipeline-reconcile", "pipeline-archive-unlinked"}:
+    if client_override is not None and args.command in {"pipeline", "pipeline-reconcile", "pipeline-archive-unlinked", "messaging-cost"}:
         previous = client_override.min_request_interval_seconds
         try:
             return _execute(args, client_override)

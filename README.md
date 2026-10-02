@@ -158,6 +158,7 @@ Read-only examples:
 
 ```sh
 unipile-recruiter doctor
+unipile-recruiter messaging-cost 'https://www.linkedin.com/talent/profile/AE...'
 unipile-recruiter projects --keywords Strala
 unipile-recruiter project 2107551666
 unipile-recruiter convert-identifier 'https://www.linkedin.com/talent/profile/AE...' --plan-only
@@ -521,3 +522,23 @@ returned 403 for archiving imported records and is not used for this command.
 Native query IDs can change; failure stops the operation rather than guessing
 another route. Archiving imports does not add replacement LinkedIn profiles:
 reconcile and save any needed linked replacements first.
+
+### Candidate messaging credit estimate
+
+`messaging-cost IDENTIFIER` reads the candidate in the connected account's Recruiter
+context and returns `status` (`free`, `requires_credit`, `unknown`, or `unavailable`),
+`expected_inmail_credits` (0, 1, or null), the relevant profile signals and a UTC
+check time. It uses no sending endpoint and omits candidate contact details.
+
+Open Profile and first-degree connections imply zero credits. A reachable
+non-connection with an explicitly closed profile implies one credit. Missing or
+invalid fields remain unknown; Open to Work is not a free-message signal.
+`can_send_inmail=false` is unavailable unless the recipient is a first-degree
+connection, which can receive ordinary connection messages without InMail.
+This estimate applies to initial contact, not follow-ups or existing chats. It
+does not calculate currency cost or check the credit balance (`inmail-credits`
+is separate); free sends remain subject to provider limits and sometimes require
+a positive credit balance. Profile reads are paced at least five seconds apart.
+
+Sources: [LinkedIn message types](https://www.linkedin.com/help/linkedin/answer/a417258)
+and [Unipile provider limits](https://developer.unipile.com/docs/provider-limits-and-restrictions).
